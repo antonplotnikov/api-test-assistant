@@ -1,0 +1,115 @@
+{
+  "openapi": "3.0.3",
+  "info": { "title": "JSONPlaceholder (демо-контракт)", "version": "1.0.0" },
+  "servers": [{ "url": "https://jsonplaceholder.typicode.com" }],
+  "paths": {
+    "/posts": {
+      "get": {
+        "tags": ["posts"],
+        "summary": "Список постов",
+        "parameters": [{ "name": "userId", "in": "query", "schema": { "type": "integer" } }],
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Post" } } } } }
+        }
+      },
+      "post": {
+        "tags": ["posts"],
+        "summary": "Создать пост",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NewPost" } } } },
+        "responses": {
+          "201": { "description": "Created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Post" } } } }
+        }
+      }
+    },
+    "/posts/{id}": {
+      "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "example": 1 } }],
+      "get": {
+        "tags": ["posts"],
+        "summary": "Пост по id",
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Post" } } } },
+          "404": { "description": "Не найден", "content": { "application/json": { "schema": { "type": "object" } } } }
+        }
+      },
+      "put": {
+        "tags": ["posts"],
+        "summary": "Обновить пост",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Post" } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Post" } } } } }
+      },
+      "delete": {
+        "tags": ["posts"],
+        "summary": "Удалить пост",
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/users/{id}": {
+      "get": {
+        "tags": ["users"],
+        "summary": "Пользователь по id",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "example": 1 } }],
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/User" } } } }
+        }
+      }
+    },
+    "/comments": {
+      "get": {
+        "tags": ["comments"],
+        "summary": "Комментарии",
+        "parameters": [{ "name": "postId", "in": "query", "required": true, "schema": { "type": "integer", "example": 1 } }],
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Comment" } } } } }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "NewPost": {
+        "type": "object",
+        "required": ["title", "body", "userId"],
+        "properties": {
+          "title": { "type": "string", "minLength": 1, "example": "Заголовок" },
+          "body": { "type": "string", "example": "Текст поста" },
+          "userId": { "type": "integer", "minimum": 1, "example": 1 }
+        }
+      },
+      "Post": {
+        "type": "object",
+        "required": ["id", "title", "body", "userId"],
+        "properties": {
+          "id": { "type": "integer" },
+          "title": { "type": "string" },
+          "body": { "type": "string" },
+          "userId": { "type": "integer" }
+        }
+      },
+      "User": {
+        "type": "object",
+        "required": ["id", "name", "username", "email"],
+        "properties": {
+          "id": { "type": "integer" },
+          "name": { "type": "string" },
+          "username": { "type": "string" },
+          "email": { "type": "string", "format": "email" },
+          "phone": { "type": "string" },
+          "website": { "type": "string" },
+          "address": { "type": "object" },
+          "company": { "type": "object" }
+        }
+      },
+      "Comment": {
+        "type": "object",
+        "required": ["postId", "id", "name", "email", "body"],
+        "properties": {
+          "postId": { "type": "integer" },
+          "id": { "type": "integer" },
+          "name": { "type": "string" },
+          "email": { "type": "string", "format": "email" },
+          "body": { "type": "string" }
+        }
+      }
+    }
+  }
+}

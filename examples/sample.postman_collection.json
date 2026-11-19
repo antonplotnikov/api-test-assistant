@@ -1,0 +1,244 @@
+{
+  "info": {
+    "_postman_id": "8a1f6c2e-0d1b-4c55-9b7e-3f2a1c9d0e11",
+    "name": "Демо: JSONPlaceholder",
+    "description": "Демо-коллекция для помощника по тестированию API. Публичный API https://jsonplaceholder.typicode.com",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+  },
+  "event": [
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "pm.test(\"[коллекция] Нет ошибок сервера\", function () {",
+          "    pm.expect(pm.response.code).to.be.below(500);",
+          "});"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    { "key": "postId", "value": "1" }
+  ],
+  "item": [
+    {
+      "name": "Посты",
+      "item": [
+        {
+          "name": "Список постов",
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/posts" },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Статус 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test(\"Вернулось 100 постов\", function () {",
+                  "    var data = pm.response.json();",
+                  "    pm.expect(data).to.be.an('array');",
+                  "    pm.expect(data).to.have.lengthOf(100);",
+                  "});",
+                  "",
+                  "pm.test(\"Время ответа < 3000 мс\", function () {",
+                  "    pm.expect(pm.response.responseTime).to.be.below(3000);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Пост по id",
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/posts/{{postId}}" },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Статус 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "var post = pm.response.json();",
+                  "",
+                  "pm.test(\"id совпадает с запрошенным\", function () {",
+                  "    pm.expect(post.id).to.eql(Number(pm.variables.get('postId')));",
+                  "});",
+                  "",
+                  "pm.test(\"Схема поста\", function () {",
+                  "    pm.response.to.have.jsonSchema({",
+                  "        type: 'object',",
+                  "        required: ['userId', 'id', 'title', 'body'],",
+                  "        properties: {",
+                  "            userId: { type: 'integer' },",
+                  "            id: { type: 'integer' },",
+                  "            title: { type: 'string' },",
+                  "            body: { type: 'string' }",
+                  "        }",
+                  "    });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Создать пост",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/posts",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Тестовый пост {{$timestamp}}\",\n  \"body\": \"Создан помощником по тестированию API\",\n  \"userId\": 1\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Статус 201 Created\", function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "",
+                  "pm.test(\"Сервер вернул отправленные поля\", function () {",
+                  "    var sent = JSON.parse(pm.request.body.toString());",
+                  "    var got = pm.response.json();",
+                  "    pm.expect(got.title).to.eql(sent.title);",
+                  "    pm.expect(got).to.have.property('id');",
+                  "});",
+                  "",
+                  "pm.environment.set('createdPostId', pm.response.json().id);",
+                  "console.log('createdPostId =', pm.environment.get('createdPostId'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Обновить пост",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "url": "{{baseUrl}}/posts/1",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": 1,\n  \"title\": \"Обновлено\",\n  \"body\": \"Новый текст\",\n  \"userId\": 1\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Статус 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"Заголовок обновлён\", function () {",
+                  "    pm.response.to.have.jsonBody('title', 'Обновлено');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Удалить пост",
+          "request": { "method": "DELETE", "header": [], "url": "{{baseUrl}}/posts/1" },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Статус 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Заведомо падающий: пост 0",
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/posts/0" },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Специально неверное ожидание — чтобы посмотреть вкладку «Анализ падений»",
+                  "pm.test(\"Статус 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Пользователи",
+      "item": [
+        {
+          "name": "Пользователь по id",
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/users/1" },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Статус 200\", function () {",
+                  "    pm.response.to.be.ok;",
+                  "});",
+                  "pm.test(\"Есть email и адрес\", function () {",
+                  "    var u = pm.response.json();",
+                  "    pm.expect(u.email).to.match(/@/);",
+                  "    pm.expect(u).to.have.nested.property('address.city');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Комментарии к посту (query)",
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/comments?postId={{postId}}" },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Все комментарии к нужному посту\", function () {",
+                  "    var list = pm.response.json();",
+                  "    pm.expect(list.length).to.be.above(0);",
+                  "    list.forEach(function (c) { pm.expect(c.postId).to.eql(1); });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

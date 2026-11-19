@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Помощник API-тестирования</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6fde'/%3E%3Cpath d='M9 17l5 5 9-11' stroke='white' stroke-width='3.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f0f2f5; --line: #dfe3e8; --text: #1c2330; --muted: #5d6878;
+  --accent: #2f6fde; --accent-text: #ffffff; --ok: #1f8a4c; --ok-bg: #e3f4ea; --fail: #c93636; --fail-bg: #fbe7e7;
+  --warn: #a86400; --warn-bg: #fdf1dc; --info: #3a64a8; --info-bg: #e6eefb; --code-bg: #f3f5f8;
+  --get: #1f8a4c; --post: #a86400; --put: #2f6fde; --patch: #7c4dce; --delete: #c93636;
+  --radius: 8px; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12161c; --panel: #1a1f27; --panel-2: #222833; --line: #2f3744; --text: #e4e8ee; --muted: #9aa5b5;
+    --accent: #5b92f0; --accent-text: #0d1117; --ok: #4cc47e; --ok-bg: #173225; --fail: #f07070; --fail-bg: #3a1c1f;
+    --warn: #e6a23c; --warn-bg: #3a2d14; --info: #7ea6ec; --info-bg: #1c2a42; --code-bg: #151a21;
+    --get: #4cc47e; --post: #e6a23c; --put: #5b92f0; --patch: #a888ec; --delete: #f07070;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12161c; --panel: #1a1f27; --panel-2: #222833; --line: #2f3744; --text: #e4e8ee; --muted: #9aa5b5;
+  --accent: #5b92f0; --accent-text: #0d1117; --ok: #4cc47e; --ok-bg: #173225; --fail: #f07070; --fail-bg: #3a1c1f;
+  --warn: #e6a23c; --warn-bg: #3a2d14; --info: #7ea6ec; --info-bg: #1c2a42; --code-bg: #151a21;
+  --get: #4cc47e; --post: #e6a23c; --put: #5b92f0; --patch: #a888ec; --delete: #f07070;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+button, input, select, textarea { font: inherit; color: inherit; }
+code, pre, textarea.code, .mono { font-family: var(--mono); font-size: 12.5px; }
+a { color: var(--accent); }
+
+header.top { position: sticky; top: 0; z-index: 10; background: var(--panel); border-bottom: 1px solid var(--line); }
+.top-row { display: flex; align-items: center; gap: 10px; padding: 8px 16px; flex-wrap: wrap; }
+.brand { font-weight: 650; font-size: 15px; margin-right: auto; white-space: nowrap; }
+nav.tabs { display: flex; gap: 2px; padding: 0 12px; overflow-x: auto; scrollbar-width: none; }
+nav.tabs button { background: none; border: 0; border-bottom: 2px solid transparent; padding: 8px 10px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+nav.tabs button.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+nav.tabs .count { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 4px; border-radius: 9px; background: var(--fail-bg); color: var(--fail); font-size: 11px; font-weight: 600; }
+
+main { padding: 16px; max-width: 1400px; margin: 0 auto; }
+section.tab { display: none; }
+section.tab.active { display: block; }
+
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; margin-bottom: 14px; min-width: 0; }
+.panel h2 { font-size: 15px; margin: 0 0 10px; }
+.panel h3 { font-size: 13px; margin: 14px 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
+.hint { color: var(--muted); font-size: 12.5px; }
+.grid-2 { display: grid; grid-template-columns: minmax(240px, 320px) minmax(0, 1fr); gap: 14px; align-items: start; }
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+@media (max-width: 820px) { .grid-2 { grid-template-columns: minmax(0, 1fr); } }
+
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.row > .grow { flex: 1 1 200px; min-width: 0; }
+label.f { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; color: var(--muted); }
+label.chk { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+input[type=text], input[type=number], input[type=url], input[type=search], select, textarea {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; min-width: 0;
+}
+input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+textarea { width: 100%; resize: vertical; min-height: 80px; }
+textarea.code { min-height: 160px; tab-size: 4; background: var(--code-bg); }
+.btn { border: 1px solid var(--line); background: var(--panel-2); border-radius: 6px; padding: 6px 11px; cursor: pointer; white-space: nowrap; }
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
+.btn.danger { color: var(--fail); }
+.btn.sm { padding: 3px 8px; font-size: 12.5px; }
+.btn[disabled] { opacity: .5; cursor: default; }
+
+.badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11.5px; font-weight: 600; background: var(--panel-2); color: var(--muted); white-space: nowrap; }
+.badge.ok { background: var(--ok-bg); color: var(--ok); }
+.badge.fail { background: var(--fail-bg); color: var(--fail); }
+.badge.warn { background: var(--warn-bg); color: var(--warn); }
+.badge.info { background: var(--info-bg); color: var(--info); }
+.m { font-family: var(--mono); font-size: 11px; font-weight: 700; display: inline-block; min-width: 44px; }
+.m.GET { color: var(--get); } .m.POST { color: var(--post); } .m.PUT { color: var(--put); } .m.PATCH { color: var(--patch); } .m.DELETE { color: var(--delete); }
+
+.mock-toggle { border-radius: 14px; }
+.mock-toggle.on { background: var(--warn-bg); color: var(--warn); border-color: var(--warn); font-weight: 600; }
+
+/* дерево */
+.tree { list-style: none; margin: 0; padding: 0; }
+.tree ul { list-style: none; margin: 0; padding-left: 14px; }
+.tree .node { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 5px; cursor: pointer; min-width: 0; }
+.tree .node:hover { background: var(--panel-2); }
+.tree .node.sel { background: var(--info-bg); }
+.tree .node .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.tree .folder > .node { font-weight: 600; }
+.tree .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.dot.ok { background: var(--ok); } .dot.fail { background: var(--fail); }
+
+/* таблицы */
+.tbl-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 12px; color: var(--muted); font-weight: 600; white-space: nowrap; }
+tr.click { cursor: pointer; }
+tr.click:hover td { background: var(--panel-2); }
+td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.kv { table-layout: fixed; }
+.kv td { padding: 3px 4px; border: 0; }
+.kv td.k { width: 38%; }
+.kv input[type=text], .kv input[type=password] { width: 100%; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+.kv .not-secret { opacity: .35; }
+
+.sub-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 10px 0; overflow-x: auto; }
+.sub-tabs button { background: none; border: 0; padding: 6px 10px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; white-space: nowrap; }
+.sub-tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
+
+pre.out { background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px; padding: 10px; overflow: auto; max-height: 420px; margin: 0; white-space: pre-wrap; word-break: break-word; }
+.tests { list-style: none; padding: 0; margin: 0; }
+.tests li { padding: 4px 0; border-bottom: 1px dashed var(--line); display: flex; gap: 8px; }
+.tests .msg { color: var(--muted); font-size: 12.5px; }
+
+.finding { border-left: 3px solid var(--line); padding: 8px 12px; margin: 8px 0; background: var(--panel-2); border-radius: 0 6px 6px 0; }
+.finding.error { border-left-color: var(--fail); } .finding.warn { border-left-color: var(--warn); } .finding.info { border-left-color: var(--info); }
+.finding .t { font-weight: 600; }
+.finding .why { white-space: pre-wrap; margin: 4px 0; }
+.finding ol { margin: 4px 0 0; padding-left: 20px; }
+
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; margin: 10px 0; }
+.stat { background: var(--panel-2); border-radius: 6px; padding: 8px 10px; }
+.stat .v { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.stat .l { font-size: 12px; color: var(--muted); }
+.chart { width: 100%; height: 220px; display: block; }
+.chart text { fill: var(--muted); font-size: 11px; }
+.chart .axis { stroke: var(--line); }
+.chart .pt-ok { fill: var(--accent); } .chart .pt-fail { fill: var(--fail); }
+.chart .bar { fill: var(--accent); opacity: .8; }
+.chart .p95 { stroke: var(--warn); stroke-dasharray: 4 3; }
+
+.notice { padding: 8px 12px; border-radius: 6px; background: var(--warn-bg); color: var(--warn); margin: 8px 0; font-size: 13px; }
+.notice.info { background: var(--info-bg); color: var(--info); }
+.empty { color: var(--muted); padding: 20px; text-align: center; }
+.toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 6px; z-index: 50; max-width: calc(100% - 32px); box-shadow: 0 4px 16px rgba(0,0,0,.2); }
+dialog { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); color: var(--text); max-width: min(640px, calc(100% - 32px)); width: 100%; padding: 16px; }
+dialog::backdrop { background: rgba(0,0,0,.4); }
+.case-list { max-height: 420px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; }
+.case-list label { display: flex; gap: 8px; padding: 5px 8px; border-bottom: 1px solid var(--line); align-items: flex-start; }
+.progress { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; margin: 8px 0; }
+.progress > div { height: 100%; background: var(--accent); width: 0; transition: width .15s; }
+.hide { display: none !important; }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="top-row">
+    <div class="brand">🧪 Помощник API-тестирования</div>
+    <label class="row hint" title="Активное окружение">Окружение
+      <select id="envSelect"></select>
+    </label>
+    <button class="btn mock-toggle" id="mockToggle" title="Подменять ответы правилами из вкладки «Моки»">Моки: выкл</button>
+    <button class="btn" id="settingsBtn" title="Настройки">⚙︎ Настройки</button>
+    <button class="btn" id="themeBtn" title="Тема">◐</button>
+  </div>
+  <nav class="tabs" id="tabs">
+    <button data-tab="collection" class="active">Коллекция</button>
+    <button data-tab="runner">Запуск и проверки</button>
+    <button data-tab="analysis">Анализ падений <span class="count hide" id="failCount"></span></button>
+    <button data-tab="generate">Генерация кейсов</button>
+    <button data-tab="load">Нагрузка</button>
+    <button data-tab="contract">Контракт</button>
+    <button data-tab="mocks">Моки</button>
+  </nav>
+</header>
+
+<main>
+  <!-- Коллекция -->
+  <section class="tab active" id="tab-collection">
+    <div class="grid-2">
+      <div>
+        <div class="panel">
+          <h2 id="collName">Коллекция</h2>
+          <div class="row">
+            <button class="btn sm" id="importBtn">Импорт…</button>
+            <button class="btn sm" id="exportBtn">Экспорт</button>
+            <button class="btn sm" id="newReqBtn">+ Запрос</button>
+            <button class="btn sm" id="newFolderBtn">+ Папка</button>
+          </div>
+          <input type="file" id="fileInput" accept=".json,.csv,.yaml,.yml,application/json" multiple class="hide">
+          <input type="search" id="treeFilter" placeholder="Поиск запроса…" style="width:100%;margin-top:10px">
+          <div id="tree" style="margin-top:8px"></div>
+        </div>
+        <div class="panel">
+          <h2>Переменные</h2>
+          <div class="sub-tabs" id="varTabs">
+            <button data-v="env" class="active">Окружение</button>
+            <button data-v="collection">Коллекция</button>
+          </div>
+          <div id="varEditor"></div>
+        </div>
+      </div>
+      <div id="editorCol">
+        <div class="panel" id="editor"></div>
+        <div class="panel" id="responsePanel"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Запуск -->
+  <section class="tab" id="tab-runner">
+    <div class="panel">
+      <h2>Прогон коллекции</h2>
+      <div class="row">
+        <label class="f grow">Что запускать<select id="runScope"></select></label>
+        <label class="f">Итерации<input type="number" id="runIter" value="1" min="1" max="100" style="width:80px"></label>
+        <label class="f">Задержка, мс<input type="number" id="runDelay" value="0" min="0" style="width:100px"></label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label class="chk"><input type="checkbox" id="runStop"> Остановить на первом падении</label>
+        <label class="chk"><input type="checkbox" id="runContract"> Проверять контракт</label>
+        <button class="btn sm" id="dataBtn">Файл данных (CSV/JSON)…</button>
+        <span class="hint" id="dataInfo"></span>
+        <input type="file" id="dataInput" accept=".csv,.json" class="hide">
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn primary" id="runBtn">▶ Запустить</button>
+        <button class="btn hide" id="stopBtn">■ Стоп</button>
+        <span class="hint" id="runStatus"></span>
+      </div>
+      <div class="progress"><div id="runProgress"></div></div>
+      <div class="stats" id="runStats"></div>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="onlyFailed"> Только упавшие</label>
+        <span style="flex:1"></span>
+        <button class="btn sm" id="reportBtn">Скопировать отчёт (Markdown)</button>
+        <button class="btn sm" id="cliBtn">Команда для CI</button>
+      </div>
+      <div class="tbl-wrap" style="margin-top:8px"><table id="runTable"></table></div>
+    </div>
+    <div class="panel hide" id="runDetail"></div>
+  </section>
+
+  <!-- Анализ -->
+  <section class="tab" id="tab-analysis">
+    <div class="panel">
+      <h2>Анализ падений</h2>
+      <p class="hint">Разбор упавших запросов последнего прогона: вероятная причина, что проверить и готовый баг-репорт. Анализ — правила по коду ответа, проверкам и контракту, без отправки данных куда-либо.</p>
+      <div id="analysisSummary"></div>
+    </div>
+    <div id="analysisList"></div>
+  </section>
+
+  <!-- Генерация -->
+  <section class="tab" id="tab-generate">
+    <div class="panel">
+      <h2>Генерация тест-кейсов</h2>
+      <p class="hint">Берёт запрос из коллекции и строит позитивные, негативные и граничные кейсы с проверками. Кейсы добавляются в коллекцию отдельной папкой — их можно сразу запустить или экспортировать в Postman.</p>
+      <div class="row">
+        <label class="f grow">Исходный запрос<select id="genSource"></select></label>
+        <label class="f">Успешный статус<input type="number" id="genOk" style="width:90px" placeholder="авто"></label>
+        <label class="f">Ошибка валидации<input type="text" id="genErr" value="400,422" style="width:110px"></label>
+      </div>
+      <h3>Группы кейсов</h3>
+      <div class="row" id="genGroups"></div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn primary" id="genBtn">Сгенерировать</button>
+        <span class="hint" id="genInfo"></span>
+      </div>
+    </div>
+    <div class="panel hide" id="genPreview"></div>
+  </section>
+
+  <!-- Нагрузка -->
+  <section class="tab" id="tab-load">
+    <div class="panel">
+      <h2>Нагрузочный прогон</h2>
+      <div class="notice">Запускайте только на своих тестовых стендах. Браузер держит ~6 одновременных соединений на хост (HTTP/1.1), поэтому это оценка «под небольшой нагрузкой», а не замена k6/JMeter/Postman Performance.</div>
+      <div class="row">
+        <label class="f grow">Запрос<select id="loadSource"></select></label>
+        <label class="f">Всего запросов<input type="number" id="loadTotal" value="100" min="1" max="2000" style="width:100px"></label>
+        <label class="f">Параллельно<input type="number" id="loadConc" value="5" min="1" max="50" style="width:90px"></label>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn primary" id="loadBtn">▶ Старт</button>
+        <button class="btn hide" id="loadStop">■ Стоп</button>
+        <span class="hint" id="loadStatus"></span>
+      </div>
+      <div class="progress"><div id="loadProgress"></div></div>
+      <div class="stats" id="loadStats"></div>
+      <div class="cols">
+        <div><h3>Время ответа по запросам</h3><svg class="chart" id="loadScatter" role="img" aria-label="Время ответа каждого запроса"></svg></div>
+        <div><h3>Распределение времени</h3><svg class="chart" id="loadHist" role="img" aria-label="Гистограмма времени ответа"></svg></div>
+      </div>
+      <h3>Коды ответов</h3>
+      <div id="loadCodes" class="row"></div>
+    </div>
+  </section>
+
+  <!-- Контракт -->
+  <section class="tab" id="tab-contract">
+    <div class="panel">
+      <h2>Контракт (OpenAPI / JSON Schema)</h2>
+      <p class="hint">Загрузите OpenAPI 3.x / Swagger 2.0 (JSON или YAML). Ответы из прогона сверяются со схемами: типы, обязательные поля, форматы, задокументированные коды.</p>
+      <div class="row">
+        <button class="btn sm" id="specFileBtn">Загрузить файл…</button>
+        <input type="file" id="specInput" accept=".json,.yaml,.yml" class="hide">
+        <button class="btn sm" id="specApply">Применить текст</button>
+        <label class="chk"><input type="checkbox" id="specStrict"> Строгий режим (сообщать о необъявленных полях)</label>
+      </div>
+      <textarea class="code" id="specText" placeholder="Вставьте OpenAPI JSON/YAML…" style="margin-top:8px"></textarea>
+      <div id="specInfo" class="hint"></div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn primary" id="contractCheck">Проверить результаты прогона</button>
+        <button class="btn" id="specToColl">Создать коллекцию из спеки</button>
+        <button class="btn" id="specToMocks">Создать моки из спеки</button>
+      </div>
+    </div>
+    <div class="panel" id="contractResult"><div class="empty">Нет данных: загрузите спецификацию и запустите прогон.</div></div>
+  </section>
+
+  <!-- Моки -->
+  <section class="tab" id="tab-mocks">
+    <div class="panel">
+      <h2>Моки</h2>
+      <p class="hint">Когда моки включены (кнопка в шапке), запросы со страницы сначала ищут подходящее правило. Путь: <code>/users/:id</code>, <code>/files/*</code> или полный URL. В теле доступны <code>{{path.id}}</code>, <code>{{request.body}}</code>, <code>{{$guid}}</code>, <code>{{$timestamp}}</code>.</p>
+      <div class="row">
+        <button class="btn sm" id="mockAdd">+ Правило</button>
+        <label class="f">Без совпадения<select id="mockFallthrough"><option value="network">отправлять в сеть</option><option value="501">отвечать 501</option></select></label>
+        <span style="flex:1"></span>
+        <button class="btn sm" id="mockExport">Экспорт для Postman Mock Server</button>
+      </div>
+      <h3>Быстрая имитация сбоя для выбранного запроса</h3>
+      <div class="row"><select id="failTarget" class="grow"></select><span id="failPresets" class="row"></span></div>
+    </div>
+    <div id="mockList"></div>
+  </section>
+</main>
+
+<dialog id="importDlg">
+  <h2 style="margin-top:0">Импорт</h2>
+  <p class="hint">Postman Collection v2.1, Postman Environment, OpenAPI (JSON/YAML) или команда cURL. Можно выбрать несколько файлов сразу.</p>
+  <div class="row"><button class="btn" id="importFile">Выбрать файлы…</button><button class="btn" id="importDemo">Загрузить демо (JSONPlaceholder)</button></div>
+  <textarea class="code" id="importText" placeholder="…или вставьте JSON / cURL сюда" style="margin-top:10px"></textarea>
+  <div class="row" style="margin-top:10px;justify-content:flex-end"><button class="btn" id="importCancel">Отмена</button><button class="btn primary" id="importPaste">Импортировать текст</button></div>
+</dialog>
+
+<dialog id="exportDlg">
+  <h2 style="margin-top:0">Экспорт</h2>
+  <div class="row"><button class="btn" id="expColl">Коллекция (.postman_collection.json)</button><button class="btn" id="expEnv">Окружение (.postman_environment.json)</button></div>
+  <label class="chk" style="margin-top:10px"><input type="checkbox" id="expSecrets"> Включить значения секретов (token, password, key…)</label>
+  <p class="hint">По умолчанию значения переменных типа secret и с именами вроде token/password/key экспортируются пустыми.</p>
+  <div class="row" style="justify-content:flex-end"><button class="btn" id="exportClose">Закрыть</button></div>
+</dialog>
+
+<dialog id="settingsDlg">
+  <h2 style="margin-top:0">Настройки</h2>
+  <label class="f">Таймаут запроса, мс<input type="number" id="setTimeout" min="100"></label>
+  <label class="f" style="margin-top:8px">Порог «медленного» ответа, мс<input type="number" id="setSlow" min="1"></label>
+  <label class="f" style="margin-top:8px">CORS-прокси (необязательно)<input type="text" id="setProxy" placeholder="http://localhost:8080/ или https://proxy/?url={url}"></label>
+  <p class="hint">Браузер отправляет запросы только к API, которые разрешают CORS. Прокси пишется перед URL; <code>{url}</code> заменяется на закодированный адрес. Не используйте чужие публичные прокси для запросов с токенами.</p>
+  <div class="row" style="justify-content:flex-end"><button class="btn" id="settingsReset">Сбросить данные страницы</button><button class="btn primary" id="settingsClose">Готово</button></div>
+</dialog>
+
+<script src="js/schema.js"></script>
+<script src="js/pm.js"></script>
+<script src="js/core.js"></script>
+<script src="js/gen.js"></script>
+<script src="js/app.js"></script>
+<script src="js/app2.js"></script>
+</body>
+</html>
