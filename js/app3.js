@@ -139,6 +139,47 @@
     toast('Выберите запрос и нажмите «Сгенерировать». Кейсы безопасности запускайте только на тестовом стенде');
   });
 
+  /* ---------- экспорт в код автотестов ---------- */
+  function fillExport() {
+    const fmt = $('#codeFormat');
+    if (!fmt.options.length) Object.entries(A.EXPORT_FORMATS).forEach(([k, f]) => fmt.appendChild(h('option', { value: k, text: f.label })));
+    const scope = $('#codeScope');
+    const prev = scope.value;
+    clear(scope);
+    Array.from($('#runScope').options).forEach((o) => scope.appendChild(h('option', { value: o.value, text: o.text })));
+    if (Array.from(scope.options).some((o) => o.value === prev)) scope.value = prev;
+    $('#codeOut').classList.add('hide');
+    codeStats();
+  }
+  function exportTargets() { return P.allTargets($('#codeScope').value || null); }
+  function codeStats() {
+    const t = exportTargets();
+    if (!t.length) { $('#codeStats').textContent = 'В выбранной области нет запросов'; return; }
+    const s = A.exportStats(S.coll, t);
+    $('#codeStats').textContent = 'Запросов: ' + s.requests + ' · проверок переведено: ' + s.checks + (s.todo ? ' · вручную (TODO): ' + s.todo : '') + (s.pre ? ' · pre-request скриптов: ' + s.pre + ' (TODO)' : '');
+  }
+  function buildCode() {
+    const targets = exportTargets();
+    if (!targets.length) { toast('В выбранной области нет запросов'); return null; }
+    const f = A.EXPORT_FORMATS[$('#codeFormat').value];
+    const code = f.fn(S.coll, targets, { envValues: P.env().values, fileName: f.file, vus: Number($('#loadConc').value) || 5, iterations: Number($('#loadTotal').value) || 100, p95: Number(S.settings.slowMs) || 2000 });
+    return { code, f };
+  }
+  $('#exportBtn').addEventListener('click', fillExport);
+  $('#codeScope').addEventListener('change', codeStats);
+  $('#codeFormat').addEventListener('change', () => $('#codeOut').classList.add('hide'));
+  $('#codePreview').addEventListener('click', () => { const b = buildCode(); if (!b) return; const out = $('#codeOut'); out.textContent = b.code; out.classList.remove('hide'); });
+  $('#codeDownload').addEventListener('click', () => { const b = buildCode(); if (b) P.download(b.f.file, b.code, b.f.type); });
+  $('#codeCopy').addEventListener('click', () => { const b = buildCode(); if (b) P.copy(b.code, 'Код'); });
+  $('#loadK6').addEventListener('click', () => {
+    const f = A.findById(S.coll, $('#loadSource').value);
+    if (!f) return toast('Выберите запрос');
+    const total = Math.max(1, Number($('#loadTotal').value) || 100), conc = Math.max(1, Number($('#loadConc').value) || 5);
+    const code = A.toK6(S.coll, [{ item: f.item, parents: f.parents }], { envValues: P.env().values, vus: conc, iterations: total, p95: Number(S.settings.slowMs) || 2000, thinkTime: 0, fileName: 'load-' + P.fileSafe(f.item.name) + '.js' });
+    P.download('load-' + P.fileSafe(f.item.name) + '.js', code, 'text/javascript');
+    toast('Сценарий k6 скачан: ' + conc + ' VU, ' + total + ' итераций, порог p95 < ' + (S.settings.slowMs || 2000) + ' мс');
+  });
+
   /* ---------- подключение к остальному UI ---------- */
   const baseRefresh = UI.refreshSelectors;
   UI.refreshSelectors = function () { baseRefresh(); fillCompare(); };

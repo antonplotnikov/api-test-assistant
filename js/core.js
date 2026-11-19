@@ -21,6 +21,52 @@
     $randomBoolean: () => String(Math.random() < 0.5),
     $randomPhoneNumber: () => '+7' + String(Math.floor(9e9 + Math.random() * 1e9)),
   };
+  // остальные популярные динамические переменные Postman
+  const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+  const rnd = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+  const FIRST = ['Anna', 'Ivan', 'Maria', 'Peter', 'Alex', 'Kate', 'Olga', 'Dmitry', 'Elena', 'Sergey'];
+  const LAST = ['Ivanov', 'Smirnova', 'Petrov', 'Kuznetsova', 'Sokolov', 'Popova', 'Lebedev', 'Novikova'];
+  const CITIES = ['Moscow', 'Saint Petersburg', 'Kazan', 'Novosibirsk', 'Berlin', 'London', 'Paris', 'Tokyo'];
+  const WORDS = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf', 'hotel', 'india', 'juliet', 'kilo', 'lima'];
+  const dayMs = 86400000;
+  const isoDate = (ms) => new Date(ms).toISOString();
+  Object.assign(DYNAMIC, {
+    $randomFirstName: () => pick(FIRST),
+    $randomLastName: () => pick(LAST),
+    $randomFullName: () => pick(FIRST) + ' ' + pick(LAST),
+    $randomUserName: () => pick(FIRST).toLowerCase() + '.' + pick(LAST).toLowerCase() + rnd(1, 999),
+    $randomPassword: () => Math.random().toString(36).slice(2, 10) + 'A1!' + Math.random().toString(36).slice(2, 6),
+    $randomCity: () => pick(CITIES),
+    $randomCountry: () => pick(['Russia', 'Germany', 'France', 'Japan', 'Brazil', 'Canada']),
+    $randomCountryCode: () => pick(['RU', 'DE', 'FR', 'JP', 'BR', 'CA']),
+    $randomStreetAddress: () => rnd(1, 200) + ' ' + pick(['Main', 'Oak', 'Lenina', 'Park', 'River']) + ' St',
+    $randomCompanyName: () => pick(['Acme', 'Globex', 'Initech', 'Umbrella', 'Hooli']) + ' ' + pick(['LLC', 'Inc', 'Group']),
+    $randomJobTitle: () => pick(['QA Engineer', 'Developer', 'Product Manager', 'Designer', 'Analyst']),
+    $randomWord: () => pick(WORDS),
+    $randomWords: () => Array.from({ length: rnd(2, 5) }, () => pick(WORDS)).join(' '),
+    $randomLoremWord: () => pick(WORDS),
+    $randomLoremSentence: () => { const s = Array.from({ length: rnd(5, 10) }, () => pick(WORDS)).join(' '); return s[0].toUpperCase() + s.slice(1) + '.'; },
+    $randomLoremParagraph: () => Array.from({ length: 3 }, () => DYNAMIC.$randomLoremSentence()).join(' '),
+    $randomUrl: () => 'https://' + pick(WORDS) + '.example.com/' + pick(WORDS),
+    $randomDomainName: () => pick(WORDS) + '.example.com',
+    $randomIP: () => [rnd(1, 223), rnd(0, 255), rnd(0, 255), rnd(1, 254)].join('.'),
+    $randomIPV6: () => Array.from({ length: 8 }, () => rnd(0, 65535).toString(16)).join(':'),
+    $randomColor: () => pick(['red', 'green', 'blue', 'black', 'white', 'orange']),
+    $randomHexColor: () => '#' + rnd(0, 0xffffff).toString(16).padStart(6, '0'),
+    $randomPrice: () => (rnd(100, 99999) / 100).toFixed(2),
+    $randomCurrencyCode: () => pick(['RUB', 'USD', 'EUR', 'JPY', 'GBP']),
+    $randomLocale: () => pick(['ru', 'en', 'de', 'fr', 'ja']),
+    $randomUserAgent: () => 'Mozilla/5.0 (API Test Assistant)',
+    $randomDatePast: () => isoDate(Date.now() - rnd(1, 365) * dayMs),
+    $randomDateFuture: () => isoDate(Date.now() + rnd(1, 365) * dayMs),
+    $randomDateRecent: () => isoDate(Date.now() - rnd(0, 2) * dayMs - rnd(0, dayMs)),
+    $randomEmail: () => pick(FIRST).toLowerCase() + '.' + rnd(1, 99999) + '@example.com',
+    $randomExampleEmail: () => pick(WORDS) + rnd(1, 999) + '@example.com',
+    $randomInt: () => String(rnd(0, 1000)),
+    $randomAlphaNumeric: () => Math.random().toString(36).slice(2, 3),
+    $randomFileName: () => pick(WORDS) + '.' + pick(['txt', 'pdf', 'png', 'json']),
+    $randomMimeType: () => pick(['application/json', 'text/plain', 'image/png', 'application/pdf']),
+  });
 
   /** Подстановка {{var}}: scopes — массив Map в порядке приоритета. → {value, unresolved:[]} */
   function resolveString(str, scopes, depth) {
@@ -296,6 +342,27 @@
     }
   }
 
+  /** Аргумент pm.sendRequest (строка или объект запроса Postman) → запрос для send(). */
+  function specToRequest(spec, replaceIn) {
+    const s = typeof spec === 'string' ? { url: spec } : spec || {};
+    const rep = (x) => (typeof x === 'string' ? replaceIn(x) : x);
+    const url = rep(typeof s.url === 'string' ? s.url : urlRaw(s.url));
+    let headers = [];
+    if (Array.isArray(s.header)) headers = s.header.filter((x) => x && !x.disabled && x.key).map((x) => [rep(x.key), rep(String(x.value == null ? '' : x.value))]);
+    else if (s.header && typeof s.header === 'object') headers = Object.entries(s.header).map(([k, v]) => [rep(k), rep(String(v))]);
+    const has = (n) => headers.some(([k]) => k.toLowerCase() === n);
+    let body;
+    const b = s.body;
+    if (b && b.mode === 'raw') body = rep(b.raw || '');
+    else if (b && b.mode === 'urlencoded') {
+      body = (b.urlencoded || []).filter((p) => !p.disabled).map((p) => encodeURIComponent(rep(p.key)) + '=' + encodeURIComponent(rep(p.value || ''))).join('&');
+      if (!has('content-type')) headers.push(['Content-Type', 'application/x-www-form-urlencoded']);
+    } else if (typeof b === 'string') body = rep(b);
+    if (typeof body === 'string' && /^\s*[[{]/.test(body) && !has('content-type')) headers.push(['Content-Type', 'application/json']);
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) throw new Error('pm.sendRequest: некорректный URL «' + url + '»');
+    return { method: String(s.method || 'GET').toUpperCase(), url, headers, body };
+  }
+
   /* ---------- раннер ---------- */
 
   /** Контекст переменных: Map'ы, общие для прогона. */
@@ -314,6 +381,9 @@
     const result = { id: item._id, name: item.name, folder: parents.map((p) => p.name).join(' / '), tests: [], logs: [], scriptErrors: [], iteration: opts.iteration || 0, startedAt: Date.now() };
     const info = { requestName: item.name, iteration: opts.iteration || 0, iterationCount: opts.iterationCount || 1 };
     const chainNodes = [c].concat(parents, [item]);
+    // pm.sendRequest идёт через те же прокси, моки и таймаут, что и основной запрос
+    const sender = (spec, replaceIn) => send(specToRequest(spec, replaceIn), opts).catch((e) => { throw new Error(e.message || String(e.kind)); });
+    const scriptTimeout = Math.max(opts.timeout || 15000, 5000) * 2;
 
     // pre-request
     const preReq = buildRequest(c, item, parents, scopeList(scopes));
@@ -321,8 +391,8 @@
     for (const n of chainNodes) {
       const code = scriptOf(n, 'prerequest');
       if (!code) continue;
-      const ctx = { request: reqCtx, scopes, info };
-      const r = ATA.runScript(code, ctx);
+      const ctx = { request: reqCtx, scopes, info, sender, timeout: scriptTimeout };
+      const r = await ATA.runScriptFull(code, ctx);
       result.logs.push(...r.logs);
       if (r.error) result.scriptErrors.push({ where: 'pre-request (' + (n === c ? 'коллекция' : n.name) + ')', ...r.error });
       if (ctx.skip) { result.skipped = true; result.pass = true; return result; }
@@ -349,8 +419,8 @@
     for (const n of chainNodes) {
       const code = scriptOf(n, 'test');
       if (!code) continue;
-      const ctx = { request: reqCtx, response: result.response, scopes, info };
-      const r = ATA.runScript(code, ctx);
+      const ctx = { request: reqCtx, response: result.response, scopes, info, sender, timeout: scriptTimeout };
+      const r = await ATA.runScriptFull(code, ctx);
       result.tests.push(...r.tests);
       result.logs.push(...r.logs);
       if (r.error) result.scriptErrors.push({ where: 'tests (' + (n === c ? 'коллекция' : n.name) + ')', ...r.error });
@@ -569,7 +639,7 @@
   const isDynamicVar = (n) => n.startsWith('$') && !!DYNAMIC[n];
 
   Object.assign(ATA, {
-    splitQuery, joinQuery, varNames, isDynamicVar,
+    splitQuery, joinQuery, varNames, isDynamicVar, specToRequest, DYNAMIC_VARS: DYNAMIC,
     uid, uuid, clone, resolveString, newCollection, newRequest, normalizeCollection, exportCollection, urlRaw, eachRequest, findById,
     scriptOf, setScript, effectiveAuth, buildRequest, findMock, mockMatch, mockResponse, send, makeScopes, scopeList, runItem, runCollection,
     toCurl, fromCurl, parseCsv, parseDataFile, stats, loadTest, sleep, STATUS_TEXT, SCHEMA_V21,

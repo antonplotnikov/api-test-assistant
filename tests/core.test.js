@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const root = path.join(__dirname, '..');
-for (const f of ['schema.js', 'pm.js', 'core.js', 'gen.js', 'security.js', 'ai.js']) vm.runInThisContext(fs.readFileSync(path.join(root, 'js', f), 'utf8'), { filename: f });
+for (const f of ['schema.js', 'pm.js', 'core.js', 'gen.js', 'security.js', 'ai.js', 'export.js']) vm.runInThisContext(fs.readFileSync(path.join(root, 'js', f), 'utf8'), { filename: f });
 const ATA = globalThis.ATA;
 const readJson = (p) => JSON.parse(fs.readFileSync(path.join(root, p), 'utf8'));
 
@@ -168,6 +168,80 @@ const section = (s) => console.log('— ' + s);
   const t0 = ATA.scriptOf(items[0], 'test'), t1 = ATA.scriptOf(items[1], 'test');
   ok(/have\.status\(201\)/.test(t0) && /property\("id"\)/.test(t0) && /oneOf\(\[400, 404\]\)/.test(t1) && /не компилируется/.test(t1) && items[1].request.url === '{{baseUrl}}/posts/0', 'проверки статуса, код ИИ, некомпилируемый код закомментирован');
   ok(AI.CASES_SCHEMA.properties.cases.items.additionalProperties === false && AI.MODELS[0].id === 'claude-opus-5-5', 'схема structured outputs и модель по умолчанию');
+
+  section('pm.sendRequest и асинхронные скрипты');
+  const authColl = ATA.normalizeCollection({ info: { name: 'auth' }, variable: [{ key: 'baseUrl', value: 'https://api.test' }], auth: { type: 'bearer', bearer: [{ key: 'token', value: '{{token}}' }] }, item: [
+    { name: 'Пост', request: { method: 'GET', url: '{{baseUrl}}/posts/1' }, event: [
+      { listen: 'prerequest', script: { exec: ["pm.sendRequest({ url: pm.variables.get('baseUrl') + '/auth', method: 'POST', header: { 'Content-Type': 'application/json' }, body: { mode: 'raw', raw: '{\"u\":\"qa\"}' } }, function (err, res) {", "  pm.environment.set('token', res.json().token);", '});'] } },
+      { listen: 'test', script: { exec: ["const other = await pm.sendRequest(pm.variables.replaceIn('{{baseUrl}}/posts/2'));", "pm.test('await sendRequest', () => pm.expect(other.json().id).to.eql(2));", "pm.test('async test', async () => { await new Promise((r) => setTimeout(r, 5)); pm.expect(1).to.eql(2); });", "pm.sendRequest('https://api.test/fail', (err) => { pm.test('ошибка в колбэк', () => pm.expect(err).to.exist); });"] } },
+    ] },
+  ] });
+  const authMocks = [
+    ATA.newMock({ method: 'POST', path: '/auth', status: 200, body: '{"token":"tok-123","echo":{{request.body}}}' }),
+    ATA.newMock({ method: 'GET', path: '/posts/:id', status: 200, body: '{"id": {{path.id}}}' }),
+    ATA.newMock({ method: 'GET', path: '/fail', network: 'error' }),
+  ];
+  const at = []; ATA.eachRequest(authColl.item, (item, parents) => at.push({ item, parents }));
+  const authScopes = ATA.makeScopes(authColl, []);
+  const ar = await ATA.runItem(authColl, at[0].item, at[0].parents, authScopes, { mockMode: true, mocks: authMocks, timeout: 2000 });
+  ok(ar.request.headers.some(([k, v]) => k === 'Authorization' && v === 'Bearer tok-123'), 'токен из pm.sendRequest в pre-request попал в основной запрос');
+  const at2 = Object.fromEntries(ar.tests.map((t) => [t.name, t]));
+  ok(at2['await sendRequest'] && at2['await sendRequest'].pass, 'await pm.sendRequest в tests');
+  ok(at2['async test'] && !at2['async test'].pass && /expected 1 to deeply equal 2/.test(at2['async test'].message), 'асинхронный pm.test дожидается и падает с сообщением');
+  ok(at2['ошибка в колбэк'] && at2['ошибка в колбэк'].pass, 'сетевая ошибка приходит в колбэк как err');
+  ok(ar.logs.some((l) => /pm\.sendRequest POST https:\/\/api\.test\/auth → 200/.test(l.text)), 'подзапросы видны в консоли');
+  ok(ar.scriptErrors.length === 0, 'без ошибок скриптов: ' + JSON.stringify(ar.scriptErrors));
+  const hang = await ATA.runScriptFull("pm.test('висит', () => new Promise(() => {}));", { scopes: ATA.makeScopes(authColl, []), timeout: 50 });
+  ok(hang.error && hang.error.name === 'TimeoutError', 'зависший async-скрипт прерывается по таймауту');
+
+  section('динамические переменные');
+  const dyn = ATA.resolveString('{{$randomFullName}}|{{$randomCity}}|{{$randomDateFuture}}|{{$randomPassword}}|{{$randomIP}}|{{$randomPrice}}', []);
+  ok(!dyn.unresolved.length && !/\{\{/.test(dyn.value) && Date.parse(dyn.value.split('|')[2]) > Date.now(), 'Postman $random*: ' + dyn.value);
+  ok(Object.keys(ATA.DYNAMIC_VARS).length >= 40, 'поддержано динамических переменных: ' + Object.keys(ATA.DYNAMIC_VARS).length);
+
+  section('поток переменных');
+  const flowColl = ATA.normalizeCollection({ info: { name: 'flow' }, item: [
+    { name: 'Профиль', request: { method: 'GET', url: '{{baseUrl}}/me', header: [{ key: 'X-Session', value: '{{sessionId}}' }] }, event: [{ listen: 'test', script: { exec: ["console.log(pm.environment.get('sessionId'));"] } }] },
+    { name: 'Логин', request: { method: 'POST', url: '{{baseUrl}}/login' }, event: [{ listen: 'test', script: { exec: ["pm.environment.set('sessionId', pm.response.json().sid);", "pm.collectionVariables.set('unused', 1);", "console.log(pm.collectionVariables.get('unused'));"] } }] },
+    { name: 'Заказ', request: { method: 'GET', url: '{{baseUrl}}/orders/{{orderId}}?t={{$timestamp}}', header: [{ key: 'Authorization', value: 'Bearer {{token}}' }] } },
+  ] });
+  const flow = ATA.analyzeVarFlow(flowColl, { env: new Map([['baseUrl', 'https://x'], ['token', '']]), coll: new Map(), data: new Set() });
+  const fv = Object.fromEntries(flow.vars.map((v) => [v.name, v]));
+  ok(fv.orderId.issues[0].sev === 'error', 'orderId не задана нигде');
+  ok(fv.sessionId.issues[0].sev === 'warn' && /раньше, чем её ставит «Логин»/.test(fv.sessionId.issues[0].text), 'sessionId используется раньше логина');
+  ok(fv.token.issues[0].sev === 'warn' && /пустое/.test(fv.token.issues[0].text), 'token пустой');
+  ok(fv.unused.issues[0].sev === 'info' && !fv.$timestamp && !fv.baseUrl.issues.length, 'unused не используется; динамические и baseUrl без замечаний');
+  ok(flow.issues[0].sev === 'error', 'замечания отсортированы по важности');
+  ok(fv.sessionId.usedBy.length === 1 && fv.unused.usedBy.length === 0, 'запрос учитывается один раз; чтение в том же скрипте, что ставит, — не потребитель');
+
+  section('экспорт в код автотестов');
+  const allT = ATA.ASSERTION_TYPES;
+  const genCode = [allT.status.code('201'), allT.statusIn.code('400,422'), allT.time.code('800'), allT.header.code('Content-Type'), allT.json.code(), allT.jsonEq.code('data.id = 7'), allT.jsonHas.code('data.items'), allT.bodyHas.code('ok'), allT.saveVar.code('token = data.accessToken'), "pm.test('тип', function () { var j = pm.response.json(); pm.expect(j.items).to.be.an('array'); pm.expect(j.items).to.have.lengthOf(3); });", "pm.test('сложная', function () { pm.expect(pm.response.json().a).to.satisfy(function (x) { return x > 1; }); });"].join('\n\n');
+  const ir = ATA.translateTests(genCode);
+  const kindsSet = new Set(ir.checks.map((c) => c.kind));
+  ok(['status', 'statusIn', 'time', 'header', 'json', 'jsonEq', 'jsonHas', 'text', 'type', 'length'].every((k) => kindsSet.has(k)), 'переведены проверки: ' + Array.from(kindsSet).join(','));
+  ok(ir.saves.length === 1 && ir.saves[0].name === 'token' && ir.saves[0].path.join('.') === 'data.accessToken', 'сохранение переменной переведено');
+  ok(ir.todo.length === 1 && /satisfy/.test(ir.todo[0]), 'непереводимое — в TODO');
+  const expColl = ATA.clone(coll);
+  ATA.normalizeCollection(expColl);
+  const expT = []; ATA.eachRequest(expColl.item, (item, parents) => expT.push({ item, parents }));
+  ATA.setScript(expT[0].item, 'test', genCode);
+  const files = { 'api.spec.ts': ATA.toPlaywright(expColl, expT, { envValues: env.values }), 'test_api.py': ATA.toPytest(expColl, expT, { envValues: env.values }), 'load.mjs': ATA.toK6(expColl, expT.slice(0, 2), { envValues: env.values, vus: 3, iterations: 30, p95: 900 }) };
+  ok(/toBe\(201\)/.test(files['api.spec.ts']) && /toHaveLength\(3\)/.test(files['api.spec.ts']) && /vars\["token"\] = String\(json\?\.data\?\.accessToken\)/.test(files['api.spec.ts']) && /'Authorization': v\("Bearer \{\{token\}\}"\)|"Authorization": v\("Bearer \{\{token\}\}"\)/.test(files['api.spec.ts']), 'Playwright: статус, длина, сохранение, унаследованный Bearer');
+  ok(/assert r\.status_code == 201/.test(files['test_api.py']) && /assert data\["data"\]\["id"\] == 7/.test(files['test_api.py']) && /os\.environ\.get\("TOKEN", ""\)/.test(files['test_api.py']) && !/demo-token-not-secret/.test(Object.values(files).join('')), 'pytest: проверки и секрет из окружения ОС (значение не вшито)');
+  ok(/p\(95\)<900/.test(files['load.mjs']) && /vus: 3, iterations: 30/.test(files['load.mjs']), 'k6: пороги и сценарий');
+  const tmp = fs.mkdtempSync(path.join(require('os').tmpdir(), 'ata-export-'));
+  Object.entries(files).forEach(([n, c]) => fs.writeFileSync(path.join(tmp, n), c));
+  const { execFileSync } = require('child_process');
+  const compileOk = (cmd, args) => { try { execFileSync(cmd, args, { stdio: 'pipe' }); return true; } catch (e) { console.log(String(e.stderr || e.message).slice(0, 400)); return false; } };
+  ok(compileOk(process.execPath, ['--check', path.join(tmp, 'load.mjs')]), 'k6-скрипт синтаксически корректен');
+  ok(compileOk('python3', ['-m', 'py_compile', path.join(tmp, 'test_api.py')]), 'pytest-файл компилируется');
+  const stripped = files['api.spec.ts'].replace(/: Record<string, string>/g, '').replace(/: Record<string, \(\) => string>/g, '').replace(/\(_, n: string\)/g, '(_, n)').replace(/\(s: string\): string/g, '(s)');
+  fs.writeFileSync(path.join(tmp, 'api.spec.mjs'), stripped);
+  ok(compileOk(process.execPath, ['--check', path.join(tmp, 'api.spec.mjs')]), 'Playwright-файл синтаксически корректен (без типов)');
+  fs.rmSync(tmp, { recursive: true, force: true });
+  const es = ATA.exportStats(expColl, expT);
+  ok(es.requests === expT.length && es.checks > 10 && es.todo >= 1, 'статистика перевода: ' + JSON.stringify(es));
 
   if (process.env.NETWORK) {
     section('реальная сеть (jsonplaceholder)');

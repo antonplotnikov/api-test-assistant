@@ -152,11 +152,21 @@
    * runScript(code, ctx) → {tests:[{name,pass,message}], logs:[], error}
    * ctx: {response?, request, scopes:{env, collection, globals, local, data}, info}
    */
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const errInfo = (e) => ({ name: (e && e.name) || 'Error', message: (e && e.message) || String(e), unsupported: !!(e && (e.name === 'UnsupportedError' || e.name === 'ReferenceError' || e.name === 'SyntaxError')) });
+
   function runScript(code, ctx) {
     const tests = [];
     const logs = [];
-    const result = { tests, logs, error: null };
+    const pendingSet = new Set();
+    const result = { tests, logs, error: null, asyncErrors: [], _pending: pendingSet };
     if (!code || !code.trim()) return result;
+    // асинхронная работа скрипта (pm.sendRequest, async-тесты, await) — ждём её в runScriptFull
+    const track = (p) => { const t = Promise.resolve(p).catch(() => {}).finally(() => pendingSet.delete(t)); pendingSet.add(t); return t; };
+    const runCb = (fn) => {
+      try { const r = fn(); if (r && typeof r.then === 'function') track(Promise.resolve(r).catch((e) => result.asyncErrors.push(errInfo(e)))); }
+      catch (e) { result.asyncErrors.push(errInfo(e)); }
+    };
 
     const sc = ctx.scopes;
     const variables = {
@@ -173,12 +183,18 @@
 
     const pm = {
       test(name, fn) {
+        const failed = (e) => ({ name, pass: false, message: (e && e.name === 'AssertionError' ? '' : (e && e.name) + ': ') + (e && e.message), unsupported: !!(e && (e.name === 'UnsupportedError' || e.name === 'ReferenceError')) });
         try {
           const r = typeof fn === 'function' ? fn() : undefined;
-          if (r && typeof r.then === 'function') { tests.push({ name, pass: false, message: 'асинхронные тесты не поддерживаются' }); return pm; }
+          if (r && typeof r.then === 'function') {
+            const entry = { name, pass: true, message: '' };
+            tests.push(entry);
+            track(Promise.resolve(r).catch((e) => Object.assign(entry, failed(e))));
+            return pm;
+          }
           tests.push({ name, pass: true, message: '' });
         } catch (e) {
-          tests.push({ name, pass: false, message: (e && e.name === 'AssertionError' ? '' : (e && e.name) + ': ') + (e && e.message), unsupported: e && (e.name === 'UnsupportedError' || e.name === 'ReferenceError') });
+          tests.push(failed(e));
         }
         return pm;
       },
@@ -190,7 +206,26 @@
       iterationData: { get: (k) => (sc.data && sc.data.has(k) ? sc.data.get(k) : undefined), has: (k) => !!(sc.data && sc.data.has(k)), toObject: () => (sc.data ? Object.fromEntries(sc.data) : {}) },
       info: Object.assign({ eventName: ctx.response ? 'test' : 'prerequest', iteration: 0, iterationCount: 1, requestName: '' }, ctx.info || {}),
       request: ctx.request ? makeRequestApi(ctx.request) : undefined,
-      sendRequest() { throw new UnsupportedError('pm.sendRequest не поддерживается в браузерном раннере — используйте Postman CLI / Newman'); },
+      /** pm.sendRequest(urlOrRequest, callback?) — как в Postman: с колбэком или через await. */
+      sendRequest(spec, cb) {
+        if (!ctx.sender) throw new UnsupportedError('pm.sendRequest недоступен в этом контексте');
+        const label = typeof spec === 'string' ? spec : spec && (typeof spec.url === 'string' ? spec.url : spec.url && spec.url.raw) || '';
+        const p = Promise.resolve().then(() => ctx.sender(spec, variables.replaceIn)).then(
+          (resp) => {
+            logs.push({ level: 'info', text: 'pm.sendRequest ' + ((spec && spec.method) || 'GET') + ' ' + variables.replaceIn(String(label)) + ' → ' + resp.code + ' (' + resp.timeMs + ' мс)' });
+            const api = makeResponseApi(resp);
+            if (cb) runCb(() => cb(null, api));
+            return api;
+          },
+          (err) => {
+            const e = err instanceof Error ? err : new Error((err && err.message) || String(err));
+            logs.push({ level: 'error', text: 'pm.sendRequest ' + variables.replaceIn(String(label)) + ' → ' + e.message });
+            if (cb) { runCb(() => cb(e, null)); return null; }
+            throw e;
+          });
+        track(p);
+        return p;
+      },
       execution: { setNextRequest(n) { ctx.nextRequest = n; }, skipRequest() { ctx.skip = true; } },
       cookies: { get: () => undefined, has: () => false, toObject: () => ({}) },
     };
@@ -214,13 +249,32 @@
     const r = ctx.response;
     try {
       // Скрипт выполняется в контексте страницы, как и в Postman: запускайте только свои/доверенные коллекции.
-      const fn = new Function('pm', 'console', 'tests', 'postman', 'require', 'responseBody', 'responseCode', 'responseTime', 'responseHeaders', 'xml2Json', '"use strict";\n' + code);
-      fn(pm, consoleApi, legacyTests, postman, req, r ? r.text : undefined, r ? { code: r.code, name: r.status } : undefined, r ? r.timeMs : undefined, r ? r.headersObj : undefined, () => { throw new UnsupportedError('xml2Json не поддерживается'); });
+      // await на верхнем уровне (как в Postman) — компилируем как async-функцию
+      const Ctor = /\bawait\b/.test(code) ? AsyncFunction : Function;
+      const fn = new Ctor('pm', 'console', 'tests', 'postman', 'require', 'responseBody', 'responseCode', 'responseTime', 'responseHeaders', 'xml2Json', '"use strict";\n' + code);
+      const ret = fn(pm, consoleApi, legacyTests, postman, req, r ? r.text : undefined, r ? { code: r.code, name: r.status } : undefined, r ? r.timeMs : undefined, r ? r.headersObj : undefined, () => { throw new UnsupportedError('xml2Json не поддерживается'); });
+      if (ret && typeof ret.then === 'function') track(ret.catch((e) => { result.error = result.error || errInfo(e); }));
     } catch (e) {
-      result.error = { name: e && e.name, message: e && e.message, unsupported: e && (e.name === 'UnsupportedError' || e.name === 'ReferenceError' || e.name === 'SyntaxError') };
+      result.error = errInfo(e);
     }
     Object.entries(legacyTests).forEach(([name, v]) => tests.push({ name, pass: !!v, message: v ? '' : 'tests["' + name + '"] = false' }));
     return result;
+  }
+
+  /** Выполнить скрипт и дождаться его асинхронной части (pm.sendRequest, async-тесты). */
+  async function runScriptFull(code, ctx) {
+    const r = runScript(code, ctx);
+    const deadline = Date.now() + (ctx.timeout || 30000);
+    while (r._pending.size && Date.now() < deadline) {
+      const left = deadline - Date.now();
+      let timer;
+      await Promise.race([Promise.all(Array.from(r._pending)), new Promise((res) => { timer = setTimeout(res, left); })]);
+      clearTimeout(timer);
+    }
+    if (r._pending.size) r.error = r.error || { name: 'TimeoutError', message: 'асинхронная часть скрипта не завершилась за ' + Math.round((ctx.timeout || 30000) / 1000) + ' с', unsupported: false };
+    if (!r.error && r.asyncErrors.length) r.error = r.asyncErrors[0];
+    delete r._pending;
+    return r;
   }
 
   function makeHeadersApi(pairs) {
@@ -265,5 +319,5 @@
     };
   }
 
-  Object.assign(ATA, { expect, runScript, AssertionError, UnsupportedError, getPath });
+  Object.assign(ATA, { expect, runScript, runScriptFull, AssertionError, UnsupportedError, getPath });
 })(typeof window !== 'undefined' ? window : globalThis);

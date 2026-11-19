@@ -118,6 +118,19 @@ const mockServer = http.createServer((req, res) => {
   ok(url === '{{baseUrl}}/comments?postId={{postId}}&_limit=2', 'URL обновился из Params: ' + url);
   await shot('1-collection');
 
+  console.log('— JSON-дерево: проверка по клику');
+  await pickNode('^GET\\s*Пост по id');
+  await page.waitForSelector('#responsePanel .jtree');
+  await page.evaluate(() => Array.from(document.querySelectorAll('#responsePanel .jtree .jv')).find((b) => /sunt aut facere/.test(b.textContent)).click());
+  await page.waitForSelector('.popmenu');
+  const menuText = await page.$eval('.popmenu', (m) => m.innerText);
+  ok(/\$\.title/.test(menuText) && /Тип: string/.test(menuText) && /Сохранить в переменную/.test(menuText), 'меню для поля $.title');
+  await page.evaluate(() => Array.from(document.querySelectorAll('.popmenu button')).find((b) => /^=/.test(b.textContent)).click());
+  const treeTests = await page.evaluate(() => window.ATA.scriptOf(window.ATA.findById(window.ATA_STATE.coll, window.ATA_STATE.selectedId).item, 'test'));
+  ok(/pm\.expect\(pm\.response\.json\(\)\.title\)\.to\.eql\("sunt aut facere/.test(treeTests), 'проверка значения добавлена в Tests');
+  await page.click('#sendBtn');
+  await page.waitForFunction(() => /проверки 6\/6/.test(document.querySelector('#responsePanel').innerText), { timeout: 20000 }).then(() => ok(true, 'новая проверка проходит (6/6)'), () => ok(false, 'новая проверка проходит (6/6)'));
+
   console.log('— прогон, история, сравнение');
   await tab('runner');
   await page.click('#runBtn');
@@ -180,6 +193,29 @@ const mockServer = http.createServer((req, res) => {
     document.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
   });
   await page.waitForFunction(() => /POST\s*\/posts/.test(document.querySelector('#tree').innerText), { timeout: 5000 }).then(() => ok(true, 'cURL из перетащенного файла стал запросом'), () => ok(false, 'cURL из перетащенного файла стал запросом'));
+
+  console.log('— поток переменных и экспорт в код');
+  await tab('collection');
+  await page.click('#varTabs button[data-v=flow]');
+  const flowText = await page.$eval('#varEditor', (e) => e.innerText);
+  ok(/\{\{createdPostId\}\}/.test(flowText) && /Ставится, но нигде не используется/.test(flowText) && /\{\{baseUrl\}\}/.test(flowText), 'поток: createdPostId ставится, но не используется' + (/Ставится, но нигде/.test(flowText) ? '' : ' → ' + flowText.slice(0, 500).replace(/\s+/g, ' ')));
+  await page.click('#varTabs button[data-v=env]');
+  await page.click('#exportBtn');
+  await page.select('#codeFormat', 'pytest');
+  await page.click('#codePreview');
+  const py = await page.$eval('#codeOut', (e) => e.textContent);
+  ok(/def test_001_/.test(py) && /assert r\.status_code == 200/.test(py) && /os\.environ\.get\("TOKEN", ""\)/.test(py), 'экспорт pytest: тесты и секрет из окружения');
+  ok(/проверок переведено: \d+/.test(await page.$eval('#codeStats', (e) => e.textContent)), 'статистика перевода показана');
+  await page.select('#codeFormat', 'playwright');
+  await page.click('#codeDownload');
+  await page.click('#exportClose');
+  await tab('load');
+  await page.click('#loadK6');
+  await sleep(1200);
+  const dl = fs.readdirSync(downloads);
+  ok(dl.includes('api.spec.ts') && /test\.describe\.serial/.test(fs.readFileSync(path.join(downloads, 'api.spec.ts'), 'utf8')), 'Playwright-файл скачан');
+  const k6f = dl.find((f) => /^load-.*\.js$/.test(f));
+  ok(k6f && /export const options/.test(fs.readFileSync(path.join(downloads, k6f), 'utf8')), 'k6-сценарий скачан с вкладки «Нагрузка»');
 
   console.log('— сканер безопасности');
   await tab('mocks');

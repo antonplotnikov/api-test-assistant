@@ -209,7 +209,7 @@
 
   /** Обновить зависящие от коллекции списки на других вкладках. */
   function onCollectionChanged() {
-    renderTree(); save();
+    renderTree(); save(); updateFlowCount();
     window.ATA_UI && window.ATA_UI.refreshSelectors && window.ATA_UI.refreshSelectors();
   }
 
@@ -270,7 +270,7 @@
     return h('div', {},
       h('label', { class: 'f' }, 'Pre-request (выполняется до запроса)', h('textarea', { class: 'code', spellcheck: 'false', value: A.scriptOf(node, 'prerequest'), oninput: (e) => { A.setScript(node, 'prerequest', e.target.value); save(); } })),
       h('label', { class: 'f', style: 'margin-top:8px' }, 'Tests (выполняются после ответа)', h('textarea', { class: 'code', id: 'testsArea', spellcheck: 'false', value: A.scriptOf(node, 'test'), oninput: (e) => { A.setScript(node, 'test', e.target.value); save(); } })),
-      h('p', { class: 'hint' }, 'Поддерживается: pm.test, pm.expect (chai: equal, eql, include, property, oneOf, below, above, a/an, lengthOf, match, not…), pm.response.to.have.status/header/jsonBody/jsonSchema, pm.environment/collectionVariables/variables/iterationData, pm.execution.setNextRequest, console.log, legacy tests[]. Не поддерживается: pm.sendRequest, require(), cookies — такие кейсы гоняйте через Newman / Postman CLI.'));
+      h('p', { class: 'hint' }, 'Поддерживается: pm.test, pm.expect (chai: equal, eql, include, property, oneOf, below, above, a/an, lengthOf, match, not…), pm.response.to.have.status/header/jsonBody/jsonSchema, pm.environment/collectionVariables/variables/iterationData, pm.execution.setNextRequest, pm.sendRequest (колбэк и await), асинхронные pm.test, console.log, legacy tests[]. Не поддерживается: require(), cookies — такие кейсы гоняйте через Newman / Postman CLI.'));
   }
 
   function checksEditor(node) {
@@ -474,7 +474,7 @@
       cur = t; if (!opts.tab) S.respTab = t;
       clear(content);
       content.appendChild(subTabs(tabs, t, draw));
-      if (t === 'body') content.appendChild(resp ? h('pre', { class: 'out' }, resp.json !== undefined ? JSON.stringify(resp.json, null, 2) : resp.text || '(пустое тело)') : h('div', { class: 'empty', text: 'Ответа нет' }));
+      if (t === 'body') content.appendChild(resp ? bodyView(r) : h('div', { class: 'empty', text: 'Ответа нет' }));
       if (t === 'headers') content.appendChild(resp ? h('table', {}, resp.headers.map(([k, v]) => h('tr', {}, h('td', { class: 'mono', text: k }), h('td', { class: 'mono', text: v })))) : h('div', { class: 'empty', text: 'Ответа нет' }));
       if (t === 'tests') content.appendChild(testsList(r));
       if (t === 'request') content.appendChild(r.request ? h('pre', { class: 'out' }, r.request.method + ' ' + r.request.url + '\n' + A.maskReq(r.request).headers.map(([k, v]) => k + ': ' + v).join('\n') + (typeof r.request.body === 'string' && r.request.body ? '\n\n' + r.request.body : '')) : h('div', { class: 'empty', text: '—' }));
@@ -484,6 +484,103 @@
     draw(cur);
     box.appendChild(content);
   }
+  /* ---------- JSON-дерево ответа: клик по значению → проверка ---------- */
+  S.bodyView = 'tree';
+  const accOf = (k) => (typeof k === 'number' ? '[' + k + ']' : /^[A-Za-z_$][\w$]*$/.test(k) ? '.' + k : '[' + JSON.stringify(k) + ']');
+  const jType = (v) => (v === null ? 'null' : Array.isArray(v) ? 'array' : typeof v);
+  function bodyView(r) {
+    const resp = r.response;
+    const wrap = h('div');
+    if (resp.json === undefined) { wrap.appendChild(h('pre', { class: 'out' }, resp.text || '(пустое тело)')); return wrap; }
+    const pane = h('div');
+    const draw = () => {
+      clear(pane);
+      if (S.bodyView === 'tree') pane.appendChild(jsonTree(resp.json, (acc, v, anchor) => pickMenu(r, acc, v, anchor)));
+      else pane.appendChild(h('pre', { class: 'out' }, JSON.stringify(resp.json, null, 2)));
+    };
+    const btn = (mode, label) => h('button', { class: 'btn sm' + (S.bodyView === mode ? ' primary' : ''), text: label, onclick: () => { S.bodyView = mode; wrap.replaceWith(bodyView(r)); } });
+    wrap.appendChild(h('div', { class: 'row', style: 'margin-bottom:6px' }, btn('tree', 'Дерево'), btn('text', 'Текст'), S.bodyView === 'tree' ? h('span', { class: 'hint', text: 'Нажмите на значение или ＋, чтобы добавить проверку или сохранить в переменную' }) : null));
+    wrap.appendChild(pane);
+    draw();
+    return wrap;
+  }
+  function jsonTree(value, onPick) {
+    const MAX = 100;
+    let budget = 3000; // ограничение на число узлов, чтобы большие ответы не тормозили страницу
+    const node = (key, v, acc, depth) => {
+      budget--;
+      const keyEl = key === null ? null : h('span', { class: 'jk', text: (typeof key === 'number' ? key : JSON.stringify(key)) + ': ' });
+      if (v && typeof v === 'object') {
+        const isArr = Array.isArray(v);
+        const entries = isArr ? v.map((x, i) => [i, x]) : Object.entries(v);
+        const det = h('details', { open: depth < 2 && entries.length <= 50 });
+        det.appendChild(h('summary', {}, keyEl, h('span', { class: 'jt', text: isArr ? 'Array(' + v.length + ')' : '{' + entries.length + '}' }), ' ',
+          h('button', { class: 'jpick', title: 'Проверки для этого узла', text: '＋', onclick: (e) => { e.preventDefault(); e.stopPropagation(); onPick(acc, v, e.currentTarget); } })));
+        const box = h('div', { class: 'jchildren' });
+        const fill = () => {
+          if (box.childNodes.length) return;
+          entries.slice(0, MAX).forEach(([k, x]) => { if (budget > 0) box.appendChild(node(k, x, acc + accOf(k), depth + 1)); });
+          if (entries.length > MAX || budget <= 0) box.appendChild(h('div', { class: 'hint', text: '…показаны не все элементы (' + entries.length + ') — переключитесь на «Текст»' }));
+        };
+        if (det.open) fill(); else det.addEventListener('toggle', fill, { once: true });
+        det.appendChild(box);
+        return det;
+      }
+      const t = jType(v);
+      const shown = typeof v === 'string' ? JSON.stringify(v.length > 200 ? v.slice(0, 200) + '…' : v) : String(v);
+      return h('div', {}, keyEl, h('button', { class: 'jv jv-' + t, text: shown, title: 'Добавить проверку для $' + acc, onclick: (e) => onPick(acc, v, e.currentTarget) }));
+    };
+    return h('div', { class: 'jtree mono' }, node(null, value, '', 0));
+  }
+  function closeMenu() { const m = document.querySelector('.popmenu'); if (m) m.remove(); }
+  document.addEventListener('click', (e) => { if (!e.target.closest('.popmenu, .jv, .jpick')) closeMenu(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMenu(); });
+  function pickMenu(r, acc, v, anchor) {
+    closeMenu();
+    const item = A.findById(S.coll, r.id);
+    const expr = 'pm.response.json()' + acc;
+    const label = '$' + acc;
+    const t = jType(v);
+    const add = (title, body) => {
+      if (!item) return toast('Запрос не найден в коллекции');
+      const code = 'pm.test(' + JSON.stringify(title) + ', function () {\n    ' + body + '\n});';
+      const cur = A.scriptOf(item.item, 'test');
+      A.setScript(item.item, 'test', (cur ? cur.replace(/\s+$/, '') + '\n\n' : '') + code);
+      save(); closeMenu();
+      if (S.selectedId === r.id && S.editorTab === 'checks') renderEditor();
+      toast('Проверка добавлена в Tests «' + item.item.name + '»');
+    };
+    const items = [];
+    if (t !== 'object' && t !== 'array') {
+      const shown = JSON.stringify(v);
+      items.push(['= ' + (shown.length > 40 ? shown.slice(0, 37) + '…' : shown), () => add(label + ' = ' + (shown.length > 60 ? shown.slice(0, 57) + '…' : shown), 'pm.expect(' + expr + ').to.eql(' + shown + ');')]);
+    }
+    items.push([t === 'null' ? 'Значение null' : 'Тип: ' + t, () => add(label + ' — ' + t, t === 'null' ? 'pm.expect(' + expr + ').to.be.null;' : 'pm.expect(' + expr + ').to.be.' + (t === 'array' || t === 'object' ? 'an' : 'a') + '(' + JSON.stringify(t) + ');')]);
+    if (acc) items.push(['Поле присутствует', () => add('Есть ' + label, 'pm.expect(' + expr + ').to.not.be.undefined;')]);
+    if (t === 'array') {
+      items.push(['Длина = ' + v.length, () => add(label + ': ' + v.length + ' элементов', 'pm.expect(' + expr + ').to.have.lengthOf(' + v.length + ');')]);
+      items.push(['Не пустой', () => add(label + ' не пустой', 'pm.expect(' + expr + ').to.not.be.empty;')]);
+    }
+    if (t === 'string') items.push(['Не пустая строка', () => add(label + ' — непустая строка', 'pm.expect(' + expr + ').to.be.a("string").and.not.be.empty;')]);
+    if (t !== 'object' && t !== 'array' && acc) items.push(['Сохранить в переменную…', () => {
+      const def = (acc.match(/([A-Za-z_$][\w$]*)$/) || [])[1] || 'value';
+      const name = prompt('Имя переменной окружения', def);
+      if (!name || !item) return;
+      const cur = A.scriptOf(item.item, 'test');
+      A.setScript(item.item, 'test', (cur ? cur.replace(/\s+$/, '') + '\n\n' : '') + '// значение для следующих запросов: {{' + name + '}}\npm.environment.set(' + JSON.stringify(name) + ', ' + expr + ');');
+      save(); closeMenu();
+      toast('После запуска «' + item.item.name + '» значение будет в {{' + name + '}}');
+    }]);
+    items.push(['Копировать путь', () => { copy(expr, 'Путь'); closeMenu(); }]);
+    const menu = h('div', { class: 'popmenu', role: 'menu' }, h('div', { class: 'ttl', text: label || '$ (корень)' }), items.map(([l, fn]) => h('button', { role: 'menuitem', text: l, onclick: fn })));
+    document.body.appendChild(menu);
+    const rect = anchor.getBoundingClientRect();
+    const mw = menu.offsetWidth;
+    menu.style.left = Math.max(8, Math.min(window.scrollX + rect.left, window.scrollX + document.documentElement.clientWidth - mw - 8)) + 'px';
+    menu.style.top = (window.scrollY + rect.bottom + 4) + 'px';
+    const first = menu.querySelector('button'); if (first) first.focus();
+  }
+
   function testsList(r) {
     const ul = h('ul', { class: 'tests' });
     if (!r.tests.length && !r.scriptErrors.length && !r.contract) ul.appendChild(h('li', { class: 'hint', text: 'Проверок нет — добавьте их на вкладке «Проверки» запроса или сгенерируйте кейсы.' }));
@@ -528,10 +625,38 @@
         S.envs.length > 1 ? h('button', { class: 'btn sm danger', text: 'Удалить', onclick: () => { if (!confirm('Удалить окружение «' + e.name + '»?')) return; S.envs.splice(S.envIdx, 1); S.envIdx = 0; renderEnvSelect(); renderVars(); save(); } }) : null));
       box.appendChild(kvTable(e.values, { enabledKey: 'enabled', secret: true, onChange: save, keyPh: 'baseUrl' }));
       box.appendChild(h('p', { class: 'hint', text: '🔒 — секрет: не сохраняется в браузере после перезагрузки и не попадает в экспорт без явного выбора.' }));
+    } else if (S.varTab === 'flow') {
+      renderFlow(box);
     } else {
       box.appendChild(kvTable(S.coll.variable, { onChange: save }));
       box.appendChild(h('p', { class: 'hint', text: 'Переменные коллекции экспортируются вместе с коллекцией. Значения окружения имеют приоритет.' }));
     }
+    updateFlowCount();
+  }
+  function flowNow() {
+    const { envMap, collMap } = runtimeMaps();
+    const data = new Set(S.dataRows && S.dataRows[0] ? Object.keys(S.dataRows[0]) : []);
+    return A.analyzeVarFlow(S.coll, { env: envMap, coll: collMap, data });
+  }
+  function updateFlowCount() {
+    const el = $('#flowCount');
+    if (!el) return;
+    const n = flowNow().issues.filter((i) => i.sev !== 'info').length;
+    el.textContent = String(n); el.classList.toggle('hide', !n);
+  }
+  function renderFlow(box) {
+    const flow = flowNow();
+    if (!flow.vars.length) { box.appendChild(h('div', { class: 'empty', text: 'В коллекции нет {{переменных}}' })); return; }
+    const SEV = { error: 'fail', warn: 'warn', info: 'info' };
+    const SRC = { env: 'окружение', collection: 'коллекция', data: 'файл данных', script: 'скрипт' };
+    const ref = (x) => h('button', { class: 'btn sm', style: 'margin:2px', title: x.where ? 'в ' + x.where : '', onclick: () => { if (x.id && x.id !== '__coll') select(x.id); } }, x.method ? methodBadge(x.method) : null, ' ', x.name);
+    box.appendChild(h('p', { class: 'hint', text: 'Порядок — как при запуске коллекции. Видно, где переменная задаётся, где используется и что может пойти не так.' }));
+    flow.vars.forEach((v) => box.appendChild(h('div', { class: 'finding ' + (v.issues[0] ? (v.issues[0].sev === 'error' ? 'error' : v.issues[0].sev) : '') },
+      h('div', { class: 'row' }, h('strong', { class: 'mono', text: '{{' + v.name + '}}' }), h('span', { class: 'badge', text: v.source ? SRC[v.source] : 'не задана' })),
+      v.issues.map((i) => h('div', {}, h('span', { class: 'badge ' + SEV[i.sev], text: i.sev === 'error' ? 'ошибка' : i.sev === 'warn' ? 'внимание' : 'инфо' }), ' ', i.text)),
+      v.setBy.length ? h('div', { class: 'hint' }, 'Ставит: ', v.setBy.map(ref)) : null,
+      v.usedBy.length <= 3 ? (v.usedBy.length ? h('div', { class: 'hint' }, 'Используют: ', v.usedBy.map(ref)) : null)
+        : h('details', { class: 'hint' }, h('summary', { text: 'Используют ' + v.usedBy.length + ' запросов' }), v.usedBy.slice(0, 30).map(ref), v.usedBy.length > 30 ? ' …' : ''))));
   }
   $('#varTabs').addEventListener('click', (e) => { const b = e.target.closest('button[data-v]'); if (b) { S.varTab = b.dataset.v; renderVars(); } });
 

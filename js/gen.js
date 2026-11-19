@@ -101,6 +101,60 @@
     return out;
   }
 
+  /* ---------- поток переменных ---------- */
+  const SET_RE = /(?:pm\.(?:environment|collectionVariables|variables|globals)\.set|postman\.set(?:Environment|Global)Variable)\(\s*(['"`])([^'"`]+)\1/g;
+  const GET_RE = /(?:pm\.(?:environment|collectionVariables|variables|globals|iterationData)\.get|postman\.get(?:Environment|Global)Variable)\(\s*(['"`])([^'"`]+)\1/g;
+  const namesIn = (re, code) => Array.from(String(code || '').matchAll(re)).map((m) => m[2]);
+
+  /**
+   * Где переменные задаются и где используются, в порядке запуска коллекции.
+   * known: {env: Map, coll: Map, data: Set} → {vars:[{name, source, setBy, usedBy, issues}], issues:[...]}
+   */
+  function analyzeVarFlow(c, known) {
+    known = known || {};
+    const env = known.env || new Map(), coll = known.coll || new Map(), data = known.data || new Set();
+    const vars = new Map();
+    const V = (n) => { if (!vars.has(n)) vars.set(n, { name: n, setBy: [], usedBy: [] }); return vars.get(n); };
+    const addOnce = (list, ref) => { if (!list.some((x) => x.id === ref.id && x.where === ref.where)) list.push(ref); };
+    const both = (node) => ATA.scriptOf(node, 'prerequest') + '\n' + ATA.scriptOf(node, 'test');
+    namesIn(SET_RE, both(c)).forEach((n) => addOnce(V(n).setBy, { id: '__coll', name: 'скрипт коллекции', order: -1, where: 'collection' }));
+    let order = 0;
+    ATA.eachRequest(c.item, (it, parents) => {
+      order++;
+      parents.forEach((p) => namesIn(SET_RE, both(p)).forEach((n) => { const ex = V(n).setBy.find((x) => x.id === p._id); if (!ex) V(n).setBy.push({ id: p._id, name: 'папка «' + p.name + '»', order: order - 0.5, where: 'folder' }); }));
+      const ref = { id: it._id, name: it.name, method: it.request.method, order };
+      // один запрос — одна запись в «используют», даже если переменная и в URL, и в скрипте
+      const use = (n, where) => { const list = V(n).usedBy; if (!list.some((x) => x.id === ref.id)) list.push(Object.assign({ where }, ref)); };
+      ATA.varNames(c, it, parents).filter((n) => !ATA.isDynamicVar(n)).forEach((n) => use(n, 'request'));
+      const testSets = new Set(namesIn(SET_RE, ATA.scriptOf(it, 'test')));
+      // чтение в том же Tests-скрипте, который переменную ставит (например, console.log), — не потребитель
+      namesIn(GET_RE, ATA.scriptOf(it, 'prerequest')).forEach((n) => use(n, 'script'));
+      namesIn(GET_RE, ATA.scriptOf(it, 'test')).filter((n) => !testSets.has(n)).forEach((n) => use(n, 'script'));
+      namesIn(SET_RE, ATA.scriptOf(it, 'prerequest')).forEach((n) => addOnce(V(n).setBy, Object.assign({}, ref, { order: order - 0.25, where: 'pre-request' })));
+      testSets.forEach((n) => addOnce(V(n).setBy, Object.assign({}, ref, { order: order + 0.25, where: 'tests' })));
+    });
+    const issues = [];
+    for (const v of vars.values()) {
+      v.source = env.has(v.name) ? 'env' : coll.has(v.name) ? 'collection' : data.has(v.name) ? 'data' : v.setBy.length ? 'script' : null;
+      v.issues = [];
+      const staticVal = env.has(v.name) ? env.get(v.name) : coll.has(v.name) ? coll.get(v.name) : undefined;
+      if (v.usedBy.length && !v.source) v.issues.push({ sev: 'error', text: 'Не задана нигде: нет ни в окружении, ни в переменных коллекции, и ни один скрипт её не ставит' });
+      else if (v.source === 'script') {
+        const firstSet = Math.min(...v.setBy.map((s) => s.order));
+        const setter = v.setBy.find((s) => s.order === firstSet);
+        const early = v.usedBy.filter((u) => u.order < firstSet);
+        if (early.length) v.issues.push({ sev: 'warn', text: 'Используется в «' + early[0].name + '»' + (early.length > 1 ? ' и ещё ' + (early.length - 1) : '') + ' раньше, чем её ставит ' + (setter.where === 'folder' || setter.where === 'collection' ? setter.name : '«' + setter.name + '»') + ' — при запуске по порядку там будет пусто' });
+      }
+      if ((v.source === 'env' || v.source === 'collection') && staticVal === '' && !v.setBy.length && v.usedBy.length) v.issues.push({ sev: 'warn', text: 'Задана, но значение пустое' + (v.source === 'env' ? ' (секреты не сохраняются после перезагрузки — введите заново)' : '') });
+      if (v.setBy.length && !v.usedBy.length) v.issues.push({ sev: 'info', text: 'Ставится, но нигде не используется' });
+      v.issues.forEach((i) => issues.push(Object.assign({ var: v.name }, i)));
+    }
+    const rank = { error: 0, warn: 1, info: 2 };
+    const list = Array.from(vars.values()).sort((a, b) => (a.issues.length ? rank[a.issues[0].sev] : 3) - (b.issues.length ? rank[b.issues[0].sev] : 3) || a.name.localeCompare(b.name));
+    issues.sort((a, b) => rank[a.sev] - rank[b.sev]);
+    return { vars: list, issues };
+  }
+
   /* ---------- история и сравнение прогонов ---------- */
   const runKey = (r) => r.id + '#' + (r.iteration || 0);
 
@@ -636,5 +690,5 @@
     return lines.join('\n');
   }
 
-  Object.assign(ATA, { diffJson, snapshotCode, summarizeRun, compareRuns, runKey, junitXml, htmlReport, ASSERTION_TYPES, inferSchema, analyze, bugReport, maskReq, CASE_GROUPS, generateCases, collectionFromOpenApi, newMock, mockFromResult, mocksFromOpenApi, FAILURE_PRESETS, collectionWithExamples, runReport, jsonBodyOf, setJsonBody });
+  Object.assign(ATA, { analyzeVarFlow, diffJson, snapshotCode, summarizeRun, compareRuns, runKey, junitXml, htmlReport, ASSERTION_TYPES, inferSchema, analyze, bugReport, maskReq, CASE_GROUPS, generateCases, collectionFromOpenApi, newMock, mockFromResult, mocksFromOpenApi, FAILURE_PRESETS, collectionWithExamples, runReport, jsonBodyOf, setJsonBody });
 })(typeof window !== 'undefined' ? window : globalThis);

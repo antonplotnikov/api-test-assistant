@@ -147,6 +147,24 @@ dialog::backdrop { background: rgba(0,0,0,.4); }
 .varline { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 6px; }
 .varline .badge { font-family: var(--mono); font-weight: 500; }
 body.dragging::after { content: "Отпустите файл: коллекция, окружение, OpenAPI или cURL"; position: fixed; inset: 10px; z-index: 100; display: flex; align-items: center; justify-content: center; border: 3px dashed var(--accent); border-radius: 12px; background: color-mix(in srgb, var(--bg) 85%, transparent); color: var(--accent); font-size: 18px; font-weight: 600; pointer-events: none; padding: 16px; text-align: center; }
+/* JSON-дерево ответа */
+.jtree { font-size: 12.5px; line-height: 1.6; background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; overflow: auto; max-height: 460px; }
+.jtree details > summary { cursor: pointer; list-style: none; }
+.jtree details > summary::-webkit-details-marker { display: none; }
+.jtree details > summary::before { content: "▸ "; color: var(--muted); }
+.jtree details[open] > summary::before { content: "▾ "; }
+.jchildren { padding-left: 16px; border-left: 1px dashed var(--line); margin-left: 4px; }
+.jk { color: var(--put); }
+.jt { color: var(--muted); }
+.jv { background: none; border: 0; padding: 0 2px; font: inherit; cursor: pointer; border-radius: 3px; text-align: left; overflow-wrap: anywhere; }
+.jv:hover, .jpick:hover { background: var(--info-bg); }
+.jv-string { color: var(--get); } .jv-number { color: var(--put); } .jv-boolean { color: var(--patch); } .jv-null { color: var(--muted); }
+.jpick { background: none; border: 1px solid var(--line); border-radius: 4px; font-size: 11px; line-height: 1; padding: 1px 4px; cursor: pointer; color: var(--muted); }
+.popmenu { position: absolute; z-index: 60; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 24px rgba(0,0,0,.18); padding: 6px; min-width: 220px; max-width: min(360px, calc(100vw - 32px)); }
+.popmenu .ttl { font-family: var(--mono); font-size: 11.5px; color: var(--muted); padding: 2px 6px 6px; overflow-wrap: anywhere; }
+.popmenu button { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 6px 8px; border-radius: 5px; cursor: pointer; }
+.popmenu button:hover { background: var(--panel-2); }
+
 /* ИИ-ассистент */
 nav.tabs button.ai-tab { color: var(--patch); }
 nav.tabs button.ai-tab.active { border-bottom-color: var(--patch); color: var(--patch); }
@@ -219,6 +237,7 @@ nav.tabs button.ai-tab.active { border-bottom-color: var(--patch); color: var(--
           <div class="sub-tabs" id="varTabs">
             <button data-v="env" class="active">Окружение</button>
             <button data-v="collection">Коллекция</button>
+            <button data-v="flow">Поток <span class="count hide" id="flowCount"></span></button>
           </div>
           <div id="varEditor"></div>
         </div>
@@ -328,6 +347,7 @@ nav.tabs button.ai-tab.active { border-bottom-color: var(--patch); color: var(--
       <div class="row" style="margin-top:10px">
         <button class="btn primary" id="loadBtn">▶ Старт</button>
         <button class="btn hide" id="loadStop">■ Стоп</button>
+        <button class="btn" id="loadK6" title="Скачать сценарий k6 с теми же параметрами — для настоящей нагрузки">Экспорт в k6</button>
         <span class="hint" id="loadStatus"></span>
       </div>
       <div class="progress"><div id="loadProgress"></div></div>
@@ -446,7 +466,13 @@ nav.tabs button.ai-tab.active { border-bottom-color: var(--patch); color: var(--
   <div class="row"><button class="btn" id="expColl">Коллекция (.postman_collection.json)</button><button class="btn" id="expEnv">Окружение (.postman_environment.json)</button></div>
   <label class="chk" style="margin-top:10px"><input type="checkbox" id="expSecrets"> Включить значения секретов (token, password, key…)</label>
   <p class="hint">По умолчанию значения переменных типа secret и с именами вроде token/password/key экспортируются пустыми.</p>
-  <div class="row" style="justify-content:flex-end"><button class="btn" id="exportClose">Закрыть</button></div>
+  <h3>Код автотестов</h3>
+  <p class="hint">Перенос в автотесты: запросы и проверки переводятся в код, переменные — в конфиг (секреты читаются из переменных окружения ОС). Что не удалось перевести автоматически, остаётся с пометкой TODO и исходным кодом Postman.</p>
+  <div class="row"><label class="f grow">Формат<select id="codeFormat"></select></label><label class="f grow">Что экспортировать<select id="codeScope"></select></label></div>
+  <div class="row" style="margin-top:8px"><button class="btn" id="codePreview">Показать</button><button class="btn primary" id="codeDownload">Скачать</button><button class="btn" id="codeCopy">Копировать</button></div>
+  <div class="hint" id="codeStats" style="margin-top:6px"></div>
+  <pre class="out hide" id="codeOut" style="margin-top:8px;max-height:300px"></pre>
+  <div class="row" style="justify-content:flex-end;margin-top:10px"><button class="btn" id="exportClose">Закрыть</button></div>
 </dialog>
 
 <dialog id="settingsDlg">
@@ -463,6 +489,7 @@ nav.tabs button.ai-tab.active { border-bottom-color: var(--patch); color: var(--
 <script src="js/core.js"></script>
 <script src="js/gen.js"></script>
 <script src="js/security.js"></script>
+<script src="js/export.js"></script>
 <script src="js/ai.js"></script>
 <script src="js/app.js"></script>
 <script src="js/app2.js"></script>
