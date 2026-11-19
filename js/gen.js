@@ -30,7 +30,149 @@
       const schema = ctx && ctx.json !== undefined ? inferSchema(ctx.json) : { type: 'object' };
       return 'pm.test("Ответ соответствует схеме", function () {\n    var schema = ' + JSON.stringify(schema, null, 2).split('\n').join('\n    ') + ';\n    pm.response.to.have.jsonSchema(schema);\n});';
     } },
+    snapshot: { label: 'Совпадает с эталоном (последний ответ)', ph: 'id, createdAt', code: (v, ctx) => snapshotCode(ctx && ctx.json, v) },
   };
+
+  const SNAPSHOT_LIMIT = 100000;
+  /**
+   * Snapshot-проверка: эталон из ответа + список игнорируемых полей (id, даты и т.п.).
+   * Код обычный JS без хелперов страницы — работает и в Postman / Newman.
+   */
+  function snapshotCode(json, ignoreList) {
+    if (json === undefined) throw new Error('Нужен JSON-ответ: сначала отправьте запрос');
+    const expected = JSON.stringify(json, null, 2);
+    if (expected.length > SNAPSHOT_LIMIT) throw new Error('Ответ слишком большой для эталона (' + Math.round(expected.length / 1024) + ' КБ > ' + SNAPSHOT_LIMIT / 1000 + ' КБ) — проверьте часть ответа через JSON-путь или схему');
+    const ignore = String(ignoreList || '').split(',').map((s) => s.trim()).filter(Boolean);
+    return [
+      'pm.test("Ответ совпадает с эталоном", function () {',
+      '    var expected = ' + expected.split('\n').join('\n    ') + ';',
+      '    var ignore = ' + JSON.stringify(ignore) + '; // поля, которые меняются от запуска к запуску',
+      '    var diffs = [];',
+      '    function cmp(actual, exp, path) {',
+      '        if (actual === exp) return;',
+      '        var bothObj = actual && exp && typeof actual === "object" && typeof exp === "object" && Array.isArray(actual) === Array.isArray(exp);',
+      '        if (!bothObj) { diffs.push(path + ": ожидалось " + JSON.stringify(exp) + ", получено " + JSON.stringify(actual)); return; }',
+      '        if (Array.isArray(exp) && actual.length !== exp.length) diffs.push(path + ": элементов " + actual.length + " вместо " + exp.length);',
+      '        Object.keys(exp).forEach(function (k) {',
+      '            if (ignore.indexOf(k) !== -1) return;',
+      '            var p = Array.isArray(exp) ? path + "[" + k + "]" : path + "." + k;',
+      '            if (!(k in actual)) diffs.push(p + ": поле пропало");',
+      '            else cmp(actual[k], exp[k], p);',
+      '        });',
+      '        if (!Array.isArray(exp)) Object.keys(actual).forEach(function (k) {',
+      '            if (!(k in exp) && ignore.indexOf(k) === -1) diffs.push(path + "." + k + ": новое поле");',
+      '        });',
+      '    }',
+      '    cmp(pm.response.json(), expected, "$");',
+      '    pm.expect(diffs, "Отличия от эталона: " + diffs.slice(0, 5).join("; ") + (diffs.length > 5 ? " (+" + (diffs.length - 5) + ")" : "")).to.be.empty;',
+      '});',
+    ].join('\n');
+  }
+
+  /* ---------- история и сравнение прогонов ---------- */
+  const runKey = (r) => r.id + '#' + (r.iteration || 0);
+
+  /** Сжатая запись прогона для истории (без тел ответов). */
+  function summarizeRun(results, meta) {
+    return Object.assign({ at: Date.now(), total: results.length, passed: results.filter((r) => r.pass).length }, meta || {}, {
+      items: results.map((r) => ({ key: runKey(r), name: r.name, method: r.request ? r.request.method : '', pass: !!r.pass, code: r.response ? r.response.code : r.error ? r.error.kind : null, ms: r.response ? r.response.timeMs : null, failed: (r.tests || []).filter((t) => !t.pass).map((t) => t.name).slice(0, 5) })),
+    });
+  }
+
+  /**
+   * Сравнение двух прогонов (prev, cur — записи summarizeRun).
+   * → {newFail, fixed, slower, codeChanged, added, removed, byKey: {key: 'regression'|'fixed'|'slower'|'new'}}
+   */
+  function compareRuns(prev, cur, opts) {
+    opts = opts || {};
+    const ratio = opts.slowRatio || 1.5, minDelta = opts.slowMinMs || 100;
+    const pm = new Map(prev.items.map((x) => [x.key, x]));
+    const cm = new Map(cur.items.map((x) => [x.key, x]));
+    const out = { newFail: [], fixed: [], slower: [], codeChanged: [], added: [], removed: [], byKey: {} };
+    for (const c of cur.items) {
+      const p = pm.get(c.key);
+      if (!p) { out.added.push(c); out.byKey[c.key] = 'new'; continue; }
+      if (p.pass && !c.pass) { out.newFail.push({ prev: p, cur: c }); out.byKey[c.key] = 'regression'; }
+      else if (!p.pass && c.pass) { out.fixed.push({ prev: p, cur: c }); out.byKey[c.key] = 'fixed'; }
+      if (p.code !== c.code) out.codeChanged.push({ prev: p, cur: c });
+      if (typeof p.ms === 'number' && typeof c.ms === 'number' && c.ms > p.ms * ratio && c.ms - p.ms > minDelta) {
+        out.slower.push({ prev: p, cur: c });
+        if (!out.byKey[c.key]) out.byKey[c.key] = 'slower';
+      }
+    }
+    for (const p of prev.items) if (!cm.has(p.key)) out.removed.push(p);
+    return out;
+  }
+
+  /* ---------- отчёты ---------- */
+  const xmlEsc = (s) => String(s == null ? '' : s).replace(/[<>&"']/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' }[c])).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '');
+
+  /** JUnit XML: один testsuite на папку, testcase на каждую проверку (или на запрос без проверок). */
+  function junitXml(results, suiteName) {
+    const suites = new Map();
+    results.forEach((r) => {
+      const name = r.folder || suiteName || 'Коллекция';
+      if (!suites.has(name)) suites.set(name, []);
+      const cls = (r.request ? r.request.method + ' ' : '') + r.name + (r.iteration ? ' [итерация ' + (r.iteration + 1) + ']' : '');
+      const time = ((r.response ? r.response.timeMs : r.error && r.error.timeMs) || 0) / 1000;
+      const cases = suites.get(name);
+      if (r.error) cases.push({ cls, name: 'Запрос выполнен', time, failure: { type: r.error.kind, message: r.error.message } });
+      else if (!r.tests.length) cases.push({ cls, name: 'Ответ получен (' + r.response.code + ')', time });
+      r.tests.forEach((t) => cases.push({ cls, name: t.name, time: 0, failure: t.pass ? null : { type: t.unsupported ? 'unsupported' : 'assertion', message: t.message }, skipped: t.skipped }));
+      (r.scriptErrors || []).forEach((e) => cases.push({ cls, name: 'Скрипт ' + e.where, time: 0, failure: { type: 'script', message: e.name + ': ' + e.message } }));
+      if (r.contract) {
+        const errs = r.contract.issues.filter((i) => i.kind !== 'extra-warn' && i.kind !== 'undocumented');
+        cases.push({ cls, name: 'Контракт', time: 0, failure: errs.length ? { type: 'contract', message: errs.slice(0, 10).map((i) => i.path + ' ' + i.message).join('\n') } : null });
+      }
+    });
+    const lines = ['<?xml version="1.0" encoding="UTF-8"?>'];
+    let all = 0, allFail = 0;
+    const body = [];
+    for (const [name, cases] of suites) {
+      const fails = cases.filter((c) => c.failure).length;
+      all += cases.length; allFail += fails;
+      body.push('  <testsuite name="' + xmlEsc(name) + '" tests="' + cases.length + '" failures="' + fails + '" skipped="' + cases.filter((c) => c.skipped).length + '" time="' + cases.reduce((s, c) => s + c.time, 0).toFixed(3) + '">');
+      cases.forEach((c) => {
+        const open = '    <testcase classname="' + xmlEsc(c.cls) + '" name="' + xmlEsc(c.name) + '" time="' + c.time.toFixed(3) + '"';
+        if (c.failure) body.push(open + '>', '      <failure type="' + xmlEsc(c.failure.type) + '" message="' + xmlEsc(String(c.failure.message).split('\n')[0]) + '">' + xmlEsc(c.failure.message) + '</failure>', '    </testcase>');
+        else if (c.skipped) body.push(open + '><skipped/></testcase>');
+        else body.push(open + '/>');
+      });
+      body.push('  </testsuite>');
+    }
+    lines.push('<testsuites name="' + xmlEsc(suiteName || 'API tests') + '" tests="' + all + '" failures="' + allFail + '">', ...body, '</testsuites>');
+    return lines.join('\n');
+  }
+
+  const htmlEsc = (s) => String(s == null ? '' : s).replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+
+  /** Самодостаточный HTML-отчёт: открывается без интернета, можно приложить к задаче. */
+  function htmlReport(results, meta) {
+    meta = meta || {};
+    const total = results.length, passed = results.filter((r) => r.pass).length;
+    const times = results.filter((r) => r.response).map((r) => r.response.timeMs);
+    const st = ATA.stats(times);
+    const row = (r, i) => {
+      const t = r.tests || [];
+      const a = r.pass ? null : analyze(r);
+      const details = [];
+      t.forEach((x) => details.push('<li class="' + (x.pass ? 'ok' : 'fail') + '">' + (x.pass ? '✓ ' : '✗ ') + htmlEsc(x.name) + (x.message ? ' — <span class="m">' + htmlEsc(x.message) + '</span>' : '') + '</li>'));
+      if (a) a.findings.filter((f) => f.category !== 'Проверка').forEach((f) => details.push('<li class="fail">⚠ <b>' + htmlEsc(f.title) + '</b><div class="m">' + htmlEsc(f.why) + '</div></li>'));
+      return '<tr class="' + (r.pass ? 'ok' : 'fail') + '"><td>' + (i + 1) + '</td><td><b>' + htmlEsc(r.request ? r.request.method : '') + '</b> ' + htmlEsc(r.name) + (r.folder ? '<div class="m">' + htmlEsc(r.folder) + '</div>' : '') + (details.length ? '<details' + (r.pass ? '' : ' open') + '><summary>проверки</summary><ul>' + details.join('') + '</ul></details>' : '') + '</td><td>' + (r.response ? r.response.code : htmlEsc(r.error ? r.error.kind : '—')) + '</td><td class="n">' + (r.response ? r.response.timeMs + ' мс' : '—') + '</td><td class="n">' + t.filter((x) => x.pass).length + '/' + t.length + '</td><td>' + (r.pass ? '✅' : '❌') + '</td></tr>';
+    };
+    return '<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>' + htmlEsc(meta.title || 'Отчёт API-тестов') + '</title><style>' +
+      ':root{--bg:#fff;--text:#1c2330;--muted:#5d6878;--line:#dfe3e8;--ok:#1f8a4c;--fail:#c93636;--panel:#f3f5f8}' +
+      '@media (prefers-color-scheme:dark){:root{--bg:#12161c;--text:#e4e8ee;--muted:#9aa5b5;--line:#2f3744;--ok:#4cc47e;--fail:#f07070;--panel:#1a1f27}}' +
+      'body{margin:0;padding:24px 16px;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,sans-serif}main{max-width:1100px;margin:0 auto}' +
+      'h1{font-size:20px;margin:0 0 4px}.meta{color:var(--muted);margin-bottom:16px}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin:16px 0}' +
+      '.card{background:var(--panel);border-radius:8px;padding:10px 12px}.card b{display:block;font-size:22px}.card span{color:var(--muted);font-size:12px}' +
+      '.wrap{overflow-x:auto}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-size:12px}' +
+      '.n{text-align:right;white-space:nowrap}tr.fail td:first-child{border-left:3px solid var(--fail)}tr.ok td:first-child{border-left:3px solid var(--ok)}' +
+      'ul{margin:6px 0;padding-left:18px}li.ok{color:var(--ok)}li.fail{color:var(--fail)}.m{color:var(--muted);font-size:12.5px;white-space:pre-wrap}summary{cursor:pointer;color:var(--muted);font-size:12.5px}' +
+      '</style></head><body><main><h1>' + htmlEsc(meta.title || 'Отчёт о прогоне API-тестов') + '</h1><div class="meta">' + htmlEsc(new Date(meta.at || Date.now()).toLocaleString()) + ' · окружение: ' + htmlEsc(meta.env || '—') + '</div>' +
+      '<div class="cards"><div class="card"><b>' + total + '</b><span>запросов</span></div><div class="card"><b style="color:var(--ok)">' + passed + '</b><span>успешно</span></div><div class="card"><b style="color:' + (total - passed ? 'var(--fail)' : 'var(--ok)') + '">' + (total - passed) + '</b><span>упало</span></div><div class="card"><b>' + Math.round(st.avg) + ' мс</b><span>среднее время</span></div><div class="card"><b>' + st.p95 + ' мс</b><span>p95</span></div></div>' +
+      '<div class="wrap"><table><tr><th>#</th><th>Запрос</th><th>Статус</th><th>Время</th><th>Проверки</th><th>Итог</th></tr>' + results.map(row).join('') + '</table></div></main></body></html>';
+  }
 
   /** Схема по образцу ответа (для быстрой фиксации контракта). */
   function inferSchema(v, depth) {
@@ -435,5 +577,5 @@
     return lines.join('\n');
   }
 
-  Object.assign(ATA, { ASSERTION_TYPES, inferSchema, analyze, bugReport, maskReq, CASE_GROUPS, generateCases, collectionFromOpenApi, newMock, mockFromResult, mocksFromOpenApi, FAILURE_PRESETS, collectionWithExamples, runReport, jsonBodyOf, setJsonBody });
+  Object.assign(ATA, { snapshotCode, summarizeRun, compareRuns, runKey, junitXml, htmlReport, ASSERTION_TYPES, inferSchema, analyze, bugReport, maskReq, CASE_GROUPS, generateCases, collectionFromOpenApi, newMock, mockFromResult, mocksFromOpenApi, FAILURE_PRESETS, collectionWithExamples, runReport, jsonBodyOf, setJsonBody });
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -531,7 +531,45 @@
     return { samples, statusCounts, elapsed, rps: elapsed > 0 ? samples.length / elapsed : 0, errorRate: samples.length ? (samples.length - okS.length) / samples.length : 0, latency: stats(samples.filter((x) => typeof x.code === 'number').map((x) => x.ms)) };
   }
 
+  /* ---------- query-параметры и переменные ---------- */
+  /** Разбить raw-URL на базу и параметры. Значения не декодируются: в них могут быть {{переменные}}. */
+  function splitQuery(raw) {
+    raw = raw || '';
+    const hashAt = raw.indexOf('#');
+    const hash = hashAt >= 0 ? raw.slice(hashAt) : '';
+    const noHash = hashAt >= 0 ? raw.slice(0, hashAt) : raw;
+    const qAt = noHash.indexOf('?');
+    if (qAt < 0) return { base: noHash, params: [], hash };
+    const params = noHash.slice(qAt + 1).split('&').filter((p) => p !== '').map((p) => {
+      const eq = p.indexOf('=');
+      return eq < 0 ? { key: p, value: '' } : { key: p.slice(0, eq), value: p.slice(eq + 1) };
+    });
+    return { base: noHash.slice(0, qAt), params, hash };
+  }
+  function joinQuery(base, params, hash) {
+    const q = (params || []).filter((p) => p.key && !p.disabled).map((p) => p.key + (p.value !== '' && p.value != null ? '=' + p.value : '')).join('&');
+    return base + (q ? '?' + q : '') + (hash || '');
+  }
+
+  /** Все {{переменные}} запроса: URL, заголовки, тело, авторизация (с учётом наследования). */
+  function varNames(c, item, parents) {
+    const r = item.request || {};
+    const texts = [urlRaw(r.url)];
+    (r.header || []).filter((x) => !x.disabled).forEach((x) => texts.push(x.key, x.value));
+    const b = r.body || {};
+    if (b.mode === 'raw') texts.push(b.raw);
+    (b.urlencoded || b.formdata || []).forEach((x) => texts.push(x.key, x.value));
+    if (b.graphql) texts.push(b.graphql.query, b.graphql.variables);
+    const auth = effectiveAuth(c, item, parents || []);
+    if (auth && Array.isArray(auth[auth.type])) auth[auth.type].forEach((p) => texts.push(p.value));
+    const names = new Set();
+    texts.forEach((t) => { if (typeof t === 'string') for (const m of t.matchAll(/\{\{\s*([^{}]+?)\s*\}\}/g)) names.add(m[1]); });
+    return Array.from(names);
+  }
+  const isDynamicVar = (n) => n.startsWith('$') && !!DYNAMIC[n];
+
   Object.assign(ATA, {
+    splitQuery, joinQuery, varNames, isDynamicVar,
     uid, uuid, clone, resolveString, newCollection, newRequest, normalizeCollection, exportCollection, urlRaw, eachRequest, findById,
     scriptOf, setScript, effectiveAuth, buildRequest, findMock, mockMatch, mockResponse, send, makeScopes, scopeList, runItem, runCollection,
     toCurl, fromCurl, parseCsv, parseDataFile, stats, loadTest, sleep, STATUS_TEXT, SCHEMA_V21,

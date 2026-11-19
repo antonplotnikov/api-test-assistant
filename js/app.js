@@ -42,8 +42,8 @@
       ta.remove();
     }
   }
-  function download(name, data) {
-    const blob = new Blob([typeof data === 'string' ? data : JSON.stringify(data, null, 2)], { type: 'application/json' });
+  function download(name, data, type) {
+    const blob = new Blob([typeof data === 'string' ? data : JSON.stringify(data, null, 2)], { type: type || 'application/json' });
     const a = h('a', { href: URL.createObjectURL(blob), download: name });
     document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
   }
@@ -294,12 +294,13 @@
       const t = A.ASSERTION_TYPES[typeSel.value];
       if (t.ph && !val.value.trim()) { val.value = t.ph; }
       const last = S.lastByItem[node._id];
-      const code = t.code(val.value.trim(), last && last.response ? { json: last.response.json } : null);
+      let code;
+      try { code = t.code(val.value.trim(), last && last.response ? { json: last.response.json } : null); } catch (err) { toast(err.message); return; }
       const cur = A.scriptOf(node, 'test');
       A.setScript(node, 'test', (cur ? cur.replace(/\s+$/, '') + '\n\n' : '') + code);
       save(); drawList(); toast('Проверка добавлена в Tests');
     } })));
-    wrap.appendChild(h('p', { class: 'hint', text: '«Совпадает со схемой из ответа» фиксирует структуру последнего ответа как JSON Schema. Проверки сохраняются как обычный код pm.test — коллекция остаётся совместимой с Postman.' }));
+    wrap.appendChild(h('p', { class: 'hint', text: '«Совпадает со схемой» фиксирует структуру последнего ответа, «Совпадает с эталоном» — сами значения (через запятую укажите меняющиеся поля: id, createdAt). Проверки сохраняются как обычный код pm.test — коллекция остаётся совместимой с Postman.' }));
     wrap.appendChild(list);
     drawList();
     return wrap;
@@ -367,15 +368,47 @@
     const req = it.request;
     const methodSel = h('select', { onchange: (e) => { req.method = e.target.value; onCollectionChanged(); } }, ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].map((m) => h('option', { value: m, text: m })));
     methodSel.value = req.method;
-    const urlIn = h('input', { type: 'text', class: 'grow mono', value: A.urlRaw(req.url), placeholder: '{{baseUrl}}/path', oninput: (e) => { req.url = e.target.value; save(); }, onkeydown: (e) => { if (e.key === 'Enter') sendSelected(); } });
+    const varLine = h('div', { class: 'varline' });
+    const drawVars = () => {
+      clear(varLine);
+      const names = A.varNames(S.coll, it, f.parents);
+      if (!names.length) return;
+      const { envMap, collMap } = runtimeMaps();
+      const dataKeys = S.dataRows && S.dataRows[0] ? Object.keys(S.dataRows[0]) : [];
+      varLine.appendChild(h('span', { class: 'hint', text: 'Переменные:' }));
+      names.forEach((n) => {
+        const src = A.isDynamicVar(n) ? 'dyn' : envMap.has(n) ? 'env' : collMap.has(n) ? 'coll' : dataKeys.includes(n) ? 'data' : null;
+        const val = src === 'env' ? envMap.get(n) : src === 'coll' ? collMap.get(n) : '';
+        const secret = isSecretKey({ key: n, type: (env().values.find((v) => v.key === n) || {}).type });
+        const title = src === 'dyn' ? 'Динамическая переменная Postman' : src === 'data' ? 'Из файла данных' : src ? (src === 'env' ? 'Окружение' : 'Коллекция') + ': ' + (secret ? '••••' : val) + (val === '' ? ' (пустое значение!)' : '') : 'Значение не задано — добавьте в окружение или переменные коллекции (либо его задаст скрипт предыдущего запроса)';
+        varLine.appendChild(h('span', { class: 'badge ' + (src && val !== '' ? 'ok' : src === 'dyn' || src === 'data' ? 'info' : src ? 'warn' : 'fail'), title, text: (src && (val !== '' || src === 'dyn' || src === 'data') ? '✓ ' : '✗ ') + n }));
+      });
+    };
+    let drawParams = () => {};
+    const urlIn = h('input', { type: 'text', class: 'grow mono', value: A.urlRaw(req.url), placeholder: '{{baseUrl}}/path', 'aria-label': 'URL', oninput: (e) => { req.url = e.target.value; save(); drawVars(); drawParams(); }, onkeydown: (e) => { if (e.key === 'Enter') sendSelected(); } });
     box.appendChild(h('div', { class: 'row' }, h('input', { type: 'text', class: 'grow', value: it.name, 'aria-label': 'Название запроса', oninput: (e) => { it.name = e.target.value; onCollectionChanged(); } }),
       h('button', { class: 'btn sm', text: 'Дублировать', onclick: () => { const c = A.clone(it); c._id = A.uid(); c.name += ' (копия)'; f.list.splice(f.list.indexOf(it) + 1, 0, c); select(c._id); onCollectionChanged(); } }),
       h('button', { class: 'btn sm danger', text: 'Удалить', onclick: () => removeSelected() })));
-    box.appendChild(h('div', { class: 'row', style: 'margin-top:8px' }, methodSel, urlIn, h('button', { class: 'btn primary', id: 'sendBtn', text: 'Отправить', onclick: sendSelected })));
-    const tabs = [['headers', 'Заголовки (' + (req.header || []).filter((x) => !x.disabled && x.key).length + ')'], ['body', 'Тело'], ['auth', 'Auth'], ['checks', 'Проверки'], ['scripts', 'Скрипты']];
+    box.appendChild(h('div', { class: 'row', style: 'margin-top:8px' }, methodSel, urlIn, h('button', { class: 'btn primary', id: 'sendBtn', text: 'Отправить', title: 'Enter в строке URL или ⌘/Ctrl+Enter', onclick: sendSelected })));
+    box.appendChild(varLine);
+    drawVars();
+    const nParams = A.splitQuery(A.urlRaw(req.url)).params.length;
+    const tabs = [['params', 'Params' + (nParams ? ' (' + nParams + ')' : '')], ['headers', 'Заголовки (' + (req.header || []).filter((x) => !x.disabled && x.key).length + ')'], ['body', 'Тело'], ['auth', 'Auth'], ['checks', 'Проверки'], ['scripts', 'Скрипты']];
     const cur = tabs.some(([id]) => id === S.editorTab) ? S.editorTab : 'headers';
     box.appendChild(subTabs(tabs, cur, (t) => { S.editorTab = t; renderEditor(); }));
-    if (cur === 'headers') box.appendChild(kvTable(req.header, { onChange: save, keyPh: 'Header' }));
+    if (cur === 'params') {
+      const pbox = h('div');
+      let parsed = A.splitQuery(A.urlRaw(req.url));
+      const sync = () => { req.url = A.joinQuery(parsed.base, parsed.params, parsed.hash); urlIn.value = req.url; save(); drawVars(); };
+      drawParams = () => {
+        parsed = A.splitQuery(A.urlRaw(req.url));
+        clear(pbox).appendChild(kvTable(parsed.params, { onChange: sync, keyPh: 'param' }));
+        pbox.appendChild(h('p', { class: 'hint', text: 'Параметры синхронизированы со строкой URL. Значения отправляются как написаны — {{переменные}} подставляются при запуске.' }));
+      };
+      drawParams();
+      box.appendChild(pbox);
+    }
+    if (cur === 'headers') box.appendChild(kvTable(req.header, { onChange: () => { save(); drawVars(); }, keyPh: 'Header' }));
     if (cur === 'body') box.appendChild(bodyEditor(req));
     if (cur === 'auth') box.appendChild(authEditor(it));
     if (cur === 'checks') box.appendChild(checksEditor(it));
@@ -391,9 +424,11 @@
     onCollectionChanged(); renderEditor(); renderResponse();
   }
 
+  let sending = false;
   async function sendSelected() {
     const f = selected();
-    if (!f || f.item.item) return;
+    if (!f || f.item.item || sending) return; // повторное нажатие во время отправки игнорируем
+    sending = true;
     const btn = $('#sendBtn');
     if (btn) { btn.disabled = true; btn.textContent = 'Отправка…'; }
     const { envMap, collMap } = runtimeMaps();
@@ -405,7 +440,9 @@
       syncBack(envMap, collMap);
       window.ATA_UI.addAdHocResult(r);
     } finally {
-      if (btn) { btn.disabled = false; btn.textContent = 'Отправить'; }
+      sending = false;
+      const b2 = $('#sendBtn'); // редактор мог перерисоваться за время запроса
+      if (b2) { b2.disabled = false; b2.textContent = 'Отправить'; }
     }
     renderTree(); renderResponse();
     if (S.editorTab === 'checks') renderEditor();
@@ -570,17 +607,43 @@
     if (!t.trim()) return toast('Вставьте JSON или cURL');
     try { toast(await importText(t)); importDlg.close(); } catch (e) { toast(e.message); }
   });
-  $('#fileInput').addEventListener('change', async (e) => {
-    const files = Array.from(e.target.files || []);
+  async function importFiles(fileList) {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
     // коллекции раньше окружений, чтобы окружение не потерялось при замене
     files.sort((a, b) => /environment/i.test(a.name) - /environment/i.test(b.name));
     const msgs = [];
     for (const f of files) {
+      if (f.size > 20 * 1024 * 1024) { msgs.push(f.name + ': файл больше 20 МБ'); continue; }
       try { msgs.push(await importText(await f.text(), f.name.replace(/\.(postman_environment|postman_collection)?\.json$/i, ''))); } catch (err) { msgs.push(f.name + ': ' + err.message); }
     }
-    e.target.value = '';
-    importDlg.close();
+    if (importDlg.open) importDlg.close();
     toast(msgs.join(' · '));
+  }
+  $('#fileInput').addEventListener('change', async (e) => { const files = Array.from(e.target.files || []); e.target.value = ''; await importFiles(files); });
+
+  // перетаскивание файлов на страницу
+  let dragDepth = 0;
+  const hasFiles = (e) => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+  document.addEventListener('dragenter', (e) => { if (!hasFiles(e)) return; dragDepth++; document.body.classList.add('dragging'); });
+  document.addEventListener('dragleave', (e) => { if (!hasFiles(e)) return; dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) document.body.classList.remove('dragging'); });
+  document.addEventListener('dragover', (e) => { if (hasFiles(e)) e.preventDefault(); });
+  document.addEventListener('drop', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault(); dragDepth = 0; document.body.classList.remove('dragging');
+    // файлы данных для раннера (CSV) обрабатываются на вкладке «Запуск»
+    const files = Array.from(e.dataTransfer.files);
+    const csv = files.filter((f) => /\.csv$/i.test(f.name));
+    if (csv.length && window.ATA_UI.loadDataFile) { window.ATA_UI.loadDataFile(csv[0]); setTab('runner'); }
+    importFiles(files.filter((f) => !/\.csv$/i.test(f.name)));
+  });
+
+  // ⌘/Ctrl+Enter — отправить выбранный запрос
+  document.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && $('#tab-collection').classList.contains('active')) {
+      const f = selected();
+      if (f && !f.item.item) { e.preventDefault(); sendSelected(); }
+    }
   });
   $('#importDemo').addEventListener('click', async () => {
     try {

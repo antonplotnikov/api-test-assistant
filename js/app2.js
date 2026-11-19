@@ -31,10 +31,28 @@
   /* ---------- раннер ---------- */
   function contractForRun() { return $('#runContract').checked && S.spec ? S.spec : null; }
 
-  async function run(folderId) {
+  /* история прогонов: хранится локально, без тел ответов */
+  const HISTORY = 'ata-history-v1';
+  const HISTORY_MAX = 15;
+  S.history = [];
+  try { S.history = JSON.parse(localStorage.getItem(HISTORY) || '[]'); } catch (e) { S.history = []; }
+  S.compare = null;
+  function saveHistory() { try { localStorage.setItem(HISTORY, JSON.stringify(S.history)); } catch (e) { /* без хранилища история живёт до перезагрузки */ } }
+  function recordHistory(meta, isRerun) {
+    const summary = A.summarizeRun(lastRun, Object.assign({ env: P.env().name }, meta));
+    const prev = isRerun ? S.history[0] : S.history.find((x) => x.scopeKey === meta.scopeKey);
+    S.compare = prev ? { base: prev, cur: summary, result: A.compareRuns(prev, summary, { slowMinMs: 100 }), partial: isRerun } : null;
+    S.history.unshift(summary);
+    S.history.length = Math.min(S.history.length, HISTORY_MAX);
+    saveHistory();
+  }
+
+  async function run(folderId, onlyIds) {
     if (runAbort) return;
-    const targets = P.allTargets(folderId || null);
+    const targets = P.allTargets(folderId || null).filter((t) => !onlyIds || onlyIds.has(t.item._id));
     if (!targets.length) return toast('В выбранной области нет запросов');
+    const folder = folderId ? A.findById(S.coll, folderId) : null;
+    const meta = onlyIds ? { scopeKey: 'rerun', scope: 'Перезапуск упавших (' + targets.length + ')' } : { scopeKey: folderId || '', scope: folder ? '📁 ' + folder.item.name : 'Вся коллекция' };
     const iterations = S.dataRows ? S.dataRows.length : Math.max(1, Math.min(100, Number($('#runIter').value) || 1));
     const total = targets.length * iterations;
     const { envMap, collMap } = P.runtimeMaps();
@@ -62,8 +80,9 @@
       $('#runStatus').textContent = (aborted ? 'Остановлено. ' : 'Готово. ') + lastRun.length + ' запросов за ' + ((performance.now() - t0) / 1000).toFixed(1) + ' с';
       P.syncBack(envMap, collMap);
       S.results = lastRun.slice();
+      if (lastRun.length) recordHistory(Object.assign({ aborted, iterations }, meta), !!onlyIds);
       P.renderTree(); P.renderResponse();
-      renderRunTable(); renderAnalysis(); updateFailCount();
+      renderRunTable(); renderAnalysis(); updateFailCount(); renderCompare(); renderHistory();
       if ($('#tab-contract').classList.contains('active')) renderContractResults();
     }
   }
@@ -73,6 +92,8 @@
   function runFolder(id) { P.setTab('runner'); $('#runScope').value = id; run(id); }
 
   function addAdHocResult(r) {
+    // во время прогона одиночный ответ не смешиваем с результатами прогона
+    if (runAbort) return;
     // одиночная отправка из редактора тоже попадает в анализ и контракт
     S.results = S.results.filter((x) => !(x.id === r.id && x.iteration === r.iteration)).concat([r]);
     lastRun = S.results;
@@ -93,20 +114,73 @@
       stats.appendChild(h('div', { class: 'stat' }, h('div', { class: 'v', style: c ? 'color:var(--' + c + ')' : '', text: String(v) }), h('div', { class: 'l', text: l }))));
     const only = $('#onlyFailed').checked;
     const multiIter = list.some((r) => r.iteration > 0);
-    tbl.appendChild(h('tr', {}, ['#', multiIter ? 'Итер.' : null, 'Запрос', 'Статус', 'Время', 'Проверки', 'Итог'].filter(Boolean).map((x) => h('th', { text: x }))));
+    const diff = S.compare && !runAbort ? S.compare.result.byKey : null;
+    const prevItems = diff ? new Map(S.compare.base.items.map((x) => [x.key, x])) : null;
+    const DIFF_BADGE = { regression: ['fail', 'регрессия'], fixed: ['ok', 'починилось'], slower: ['warn', 'медленнее'], new: ['info', 'новый'] };
+    tbl.appendChild(h('tr', {}, ['#', multiIter ? 'Итер.' : null, 'Запрос', 'Статус', 'Время', 'Проверки', 'Итог', diff ? 'Δ к прошлому' : null].filter(Boolean).map((x) => h('th', { text: x }))));
     list.forEach((r, i) => {
       if (only && r.pass) return;
       const tp = r.tests.filter((t) => t.pass).length;
+      const d = diff && diff[A.runKey(r)];
+      const p = prevItems && prevItems.get(A.runKey(r));
+      const dCell = !diff ? null : h('td', {}, d ? h('span', { class: 'badge ' + DIFF_BADGE[d][0], title: p ? 'Было: ' + (p.pass ? 'PASS' : 'FAIL') + ', ' + p.code + ', ' + p.ms + ' мс' : 'В прошлом прогоне не было', text: DIFF_BADGE[d][1] + (d === 'slower' && p && p.ms ? ' ×' + (r.response.timeMs / p.ms).toFixed(1) : '') }) : h('span', { class: 'hint', text: p ? '=' : '' }));
       tbl.appendChild(h('tr', { class: 'click', onclick: () => showDetail(r), title: 'Подробности' },
         h('td', { class: 'num', text: String(i + 1) }), multiIter ? h('td', { class: 'num', text: String(r.iteration + 1) }) : null,
         h('td', {}, r.request ? P.methodBadge(r.request.method) : null, ' ', r.name, r.folder ? h('div', { class: 'hint', text: r.folder }) : null),
         h('td', {}, r.response ? P.statusBadge(r.response.code) : h('span', { class: 'badge fail', text: r.error ? r.error.kind : r.skipped ? 'skip' : '—' }), r.response && r.response.mocked ? h('span', { class: 'badge warn', text: 'мок', style: 'margin-left:4px' }) : null),
         h('td', { class: 'num', text: r.response ? r.response.timeMs + ' мс' : '—' }),
         h('td', { class: 'num', text: r.tests.length ? tp + '/' + r.tests.length : '—' }),
-        h('td', {}, h('span', { class: 'badge ' + (r.pass ? 'ok' : 'fail'), text: r.pass ? 'PASS' : 'FAIL' }))));
+        h('td', {}, h('span', { class: 'badge ' + (r.pass ? 'ok' : 'fail'), text: r.pass ? 'PASS' : 'FAIL' })), dCell));
     });
+    $('#rerunFailed').disabled = !!runAbort || !S.results.some((r) => !r.pass);
   }
   $('#onlyFailed').addEventListener('change', renderRunTable);
+
+  $('#rerunFailed').addEventListener('click', () => {
+    const ids = new Set(S.results.filter((r) => !r.pass).map((r) => r.id));
+    if (!ids.size) return toast('Упавших запросов нет');
+    run(null, ids);
+  });
+
+  const fmtDate = (t) => new Date(t).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  function renderCompare() {
+    const box = clear($('#runCompare'));
+    if (!S.compare) return;
+    const { base, result: c, partial } = S.compare;
+    const names = (arr) => arr.slice(0, 4).map((x) => (x.cur || x).name).join(', ') + (arr.length > 4 ? ' и ещё ' + (arr.length - 4) : '');
+    const parts = [];
+    if (c.newFail.length) parts.push(h('div', {}, h('span', { class: 'badge fail', text: '▼ ' + c.newFail.length + ' новых падений' }), ' ', names(c.newFail)));
+    if (c.fixed.length) parts.push(h('div', {}, h('span', { class: 'badge ok', text: '▲ ' + c.fixed.length + ' починилось' }), ' ', names(c.fixed)));
+    if (c.slower.length) parts.push(h('div', {}, h('span', { class: 'badge warn', text: '🐢 ' + c.slower.length + ' заметно медленнее' }), ' ', names(c.slower)));
+    const shown = new Set(c.newFail.concat(c.fixed).map((x) => x.cur.key));
+    const codes = c.codeChanged.filter((x) => !shown.has(x.cur.key));
+    if (codes.length) parts.push(h('div', {}, h('span', { class: 'badge info', text: codes.length + ' сменили код ответа' }), ' ', codes.slice(0, 4).map((x) => x.cur.name + ' (' + x.prev.code + '→' + x.cur.code + ')').join(', ')));
+    if (!partial && c.added.length) parts.push(h('div', { class: 'hint', text: 'Новых запросов: ' + c.added.length }));
+    box.appendChild(h('div', { class: 'notice ' + (c.newFail.length ? '' : 'info') },
+      h('div', { style: 'font-weight:600;margin-bottom:4px', text: 'Сравнение с прогоном от ' + fmtDate(base.at) + ' (' + base.passed + '/' + base.total + ')' }),
+      parts.length ? parts : h('div', { text: 'Изменений нет: те же результаты, без заметных замедлений.' })));
+  }
+
+  function renderHistory() {
+    const box = clear($('#historyPanel'));
+    box.appendChild(h('div', { class: 'row' }, h('h2', { text: 'История прогонов', style: 'margin:0' }), h('span', { class: 'hint', text: 'последние ' + HISTORY_MAX + ', хранится в этом браузере' }), h('span', { style: 'flex:1' }),
+      S.history.length ? h('button', { class: 'btn sm danger', text: 'Очистить', onclick: () => { if (!confirm('Удалить историю прогонов?')) return; S.history = []; S.compare = null; saveHistory(); renderHistory(); renderCompare(); renderRunTable(); } }) : null));
+    if (!S.history.length) { box.appendChild(h('div', { class: 'empty', text: 'После каждого прогона здесь появится запись — и сравнение с предыдущим запуском той же области.' })); return; }
+    const tbl = h('table');
+    tbl.appendChild(h('tr', {}, ['Когда', 'Что', 'Окружение', 'Итог', 'Время p95', ''].map((x) => h('th', { text: x }))));
+    S.history.forEach((run, i) => {
+      const ms = run.items.map((x) => x.ms).filter((x) => typeof x === 'number');
+      const bad = run.total - run.passed;
+      tbl.appendChild(h('tr', {},
+        h('td', { class: 'num', text: fmtDate(run.at) }),
+        h('td', {}, run.scope || '—', run.aborted ? h('span', { class: 'badge warn', text: 'остановлен', style: 'margin-left:4px' }) : null, run.iterations > 1 ? h('span', { class: 'hint', text: ' ×' + run.iterations }) : null),
+        h('td', { text: run.env || '—' }),
+        h('td', {}, h('span', { class: 'badge ' + (bad ? 'fail' : 'ok'), text: run.passed + '/' + run.total })),
+        h('td', { class: 'num', text: ms.length ? A.stats(ms).p95 + ' мс' : '—' }),
+        h('td', {}, i > 0 ? h('button', { class: 'btn sm', text: 'Сравнить с последним', onclick: () => { S.compare = { base: run, cur: S.history[0], result: A.compareRuns(run, S.history[0]), partial: S.history[0].scopeKey === 'rerun' }; renderCompare(); renderRunTable(); $('#runCompare').scrollIntoView({ behavior: 'smooth', block: 'center' }); } }) : h('span', { class: 'hint', text: 'последний' }))));
+    });
+    box.appendChild(h('div', { class: 'tbl-wrap' }, tbl));
+  }
 
   function showDetail(r) {
     const box = clear($('#runDetail'));
@@ -117,6 +191,15 @@
   }
 
   $('#reportBtn').addEventListener('click', () => { if (!S.results.length) return toast('Сначала запустите прогон'); copy(A.runReport(S.results, P.env().name), 'Отчёт'); });
+  const reportName = (ext) => P.fileSafe(S.coll.info.name) + '-' + new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-') + '.' + ext;
+  $('#htmlReportBtn').addEventListener('click', () => {
+    if (!S.results.length) return toast('Сначала запустите прогон');
+    download(reportName('html'), A.htmlReport(S.results, { env: P.env().name, title: 'Отчёт: ' + S.coll.info.name }), 'text/html');
+  });
+  $('#junitBtn').addEventListener('click', () => {
+    if (!S.results.length) return toast('Сначала запустите прогон');
+    download(reportName('xml'), A.junitXml(S.results, S.coll.info.name), 'application/xml');
+  });
   $('#cliBtn').addEventListener('click', () => {
     const c = P.fileSafe(S.coll.info.name) + '.postman_collection.json', e = P.fileSafe(P.env().name) + '.postman_environment.json';
     const cmd = '# Экспортируйте коллекцию и окружение (кнопка «Экспорт»), затем:\n' +
@@ -131,7 +214,9 @@
   $('#dataInput').addEventListener('change', async (e) => {
     const f = e.target.files[0];
     e.target.value = '';
-    if (!f) return;
+    if (f) loadDataFile(f);
+  });
+  async function loadDataFile(f) {
     try {
       const rows = A.parseDataFile(await f.text());
       if (!rows.length) throw new Error('в файле нет строк данных');
@@ -139,8 +224,9 @@
       $('#dataInfo').textContent = f.name + ': ' + rows.length + ' итераций, поля: ' + Object.keys(rows[0]).join(', ');
       $('#dataBtn').textContent = 'Убрать файл данных';
       $('#runIter').disabled = true;
+      toast('Файл данных подключён: ' + rows.length + ' итераций');
     } catch (err) { toast('Файл данных: ' + err.message); }
-  });
+  }
 
   /* ---------- анализ ---------- */
   function updateFailCount() {
@@ -437,8 +523,8 @@
 
   /* ---------- инициализация ---------- */
   window.ATA_UI = {
-    init() { initGen(); initFailPresets(); refreshSelectors(); renderSpec(); renderMocks(); renderRunTable(); renderAnalysis(); },
-    refreshSelectors, runFolder, contractForRun, addAdHocResult, renderMocks, renderSpec,
+    init() { initGen(); initFailPresets(); refreshSelectors(); renderSpec(); renderMocks(); renderRunTable(); renderAnalysis(); renderHistory(); },
+    refreshSelectors, runFolder, contractForRun, addAdHocResult, renderMocks, renderSpec, loadDataFile,
     onTab_contract: renderContractResults,
     onTab_analysis: renderAnalysis,
     onTab_generate: () => requestOptions($('#genSource'), true),

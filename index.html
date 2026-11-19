@@ -144,6 +144,10 @@ dialog::backdrop { background: rgba(0,0,0,.4); }
 .progress { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; margin: 8px 0; }
 .progress > div { height: 100%; background: var(--accent); width: 0; transition: width .15s; }
 .hide { display: none !important; }
+.varline { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 6px; }
+.varline .badge { font-family: var(--mono); font-weight: 500; }
+body.dragging::after { content: "Отпустите файл: коллекция, окружение, OpenAPI или cURL"; position: fixed; inset: 10px; z-index: 100; display: flex; align-items: center; justify-content: center; border: 3px dashed var(--accent); border-radius: 12px; background: color-mix(in srgb, var(--bg) 85%, transparent); color: var(--accent); font-size: 18px; font-weight: 600; pointer-events: none; padding: 16px; text-align: center; }
+.kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -224,15 +228,21 @@ dialog::backdrop { background: rgba(0,0,0,.4); }
       </div>
       <div class="progress"><div id="runProgress"></div></div>
       <div class="stats" id="runStats"></div>
+      <div id="runCompare"></div>
       <div class="row">
         <label class="chk"><input type="checkbox" id="onlyFailed"> Только упавшие</label>
+        <button class="btn sm" id="rerunFailed" disabled title="Запустить ещё раз только запросы, упавшие в последнем прогоне">↻ Перезапустить упавшие</button>
         <span style="flex:1"></span>
-        <button class="btn sm" id="reportBtn">Скопировать отчёт (Markdown)</button>
+        <span class="hint">Отчёт:</span>
+        <button class="btn sm" id="htmlReportBtn" title="Самодостаточный HTML-файл — можно приложить к задаче">HTML</button>
+        <button class="btn sm" id="junitBtn" title="JUnit XML для CI и систем управления тестами">JUnit XML</button>
+        <button class="btn sm" id="reportBtn" title="Скопировать отчёт в Markdown">Markdown</button>
         <button class="btn sm" id="cliBtn">Команда для CI</button>
       </div>
       <div class="tbl-wrap" style="margin-top:8px"><table id="runTable"></table></div>
     </div>
     <div class="panel hide" id="runDetail"></div>
+    <div class="panel" id="historyPanel"></div>
   </section>
 
   <!-- Анализ -->
@@ -333,7 +343,7 @@ dialog::backdrop { background: rgba(0,0,0,.4); }
 
 <dialog id="importDlg">
   <h2 style="margin-top:0">Импорт</h2>
-  <p class="hint">Postman Collection v2.1, Postman Environment, OpenAPI (JSON/YAML) или команда cURL. Можно выбрать несколько файлов сразу.</p>
+  <p class="hint">Postman Collection v2.1, Postman Environment, OpenAPI (JSON/YAML) или команда cURL. Можно выбрать несколько файлов сразу или просто перетащить их на страницу.</p>
   <div class="row"><button class="btn" id="importFile">Выбрать файлы…</button><button class="btn" id="importDemo">Загрузить демо (JSONPlaceholder)</button></div>
   <textarea class="code" id="importText" placeholder="…или вставьте JSON / cURL сюда" style="margin-top:10px"></textarea>
   <div class="row" style="margin-top:10px;justify-content:flex-end"><button class="btn" id="importCancel">Отмена</button><button class="btn primary" id="importPaste">Импортировать текст</button></div>

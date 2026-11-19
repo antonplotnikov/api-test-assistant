@@ -1,0 +1,15 @@
+{
+  "name": "api-test-assistant",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Помощник API-тестирования: Postman-коллекции, проверки, анализ падений, генерация кейсов, нагрузка, контракт и моки в браузере",
+  "scripts": {
+    "start": "python3 -m http.server 8765",
+    "test": "node tests/core.test.js",
+    "test:network": "NETWORK=1 node tests/core.test.js",
+    "test:e2e": "node tests/e2e.js"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^23.11.1"
+  }
+}
