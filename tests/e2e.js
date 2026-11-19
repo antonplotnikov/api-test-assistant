@@ -14,7 +14,55 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let fails = 0;
 const ok = (c, m) => { console.log((c ? '  ok  ' : '  FAIL') + ' ' + m); if (!c) fails++; };
 
+/* Локальный mock-сервер: имитирует Claude Messages API (SSE) и «второе окружение» для сравнения.
+   Реальный API Anthropic в тестах не вызывается — деньги не тратятся. */
+const http = require('http');
+const MOCK_PORT = Number(process.env.MOCK_PORT || 8766);
+const aiCalls = [];
+function sse(res, text, model) {
+  res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Access-Control-Allow-Origin': '*' });
+  const ev = (type, data) => res.write('event: ' + type + '\ndata: ' + JSON.stringify(Object.assign({ type }, data)) + '\n\n');
+  ev('message_start', { message: { id: 'msg_test', type: 'message', role: 'assistant', model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 120, output_tokens: 1, cache_read_input_tokens: 900 } } });
+  ev('content_block_start', { index: 0, content_block: { type: 'thinking', thinking: '', signature: '' } });
+  ev('content_block_delta', { index: 0, delta: { type: 'thinking_delta', thinking: 'Смотрю на статус и проверки.' } });
+  ev('content_block_delta', { index: 0, delta: { type: 'signature_delta', signature: 'sig' } });
+  ev('content_block_stop', { index: 0 });
+  ev('content_block_start', { index: 1, content_block: { type: 'text', text: '' } });
+  for (let i = 0; i < text.length; i += 40) ev('content_block_delta', { index: 1, delta: { type: 'text_delta', text: text.slice(i, i + 40) } });
+  ev('content_block_stop', { index: 1 });
+  ev('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 42 } });
+  ev('message_stop', {});
+  res.end();
+}
+const mockServer = http.createServer((req, res) => {
+  const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' };
+  if (req.method === 'OPTIONS') { res.writeHead(204, cors); return res.end(); }
+  if (req.method === 'GET' && req.url.startsWith('/jp/users/1')) {
+    res.writeHead(200, Object.assign({ 'Content-Type': 'application/json' }, cors));
+    return res.end(JSON.stringify({ id: 1, name: 'Changed Name', username: 'Bret', email: 'Sincere@april.biz', address: { city: 'Gwenborough' } }));
+  }
+  if (req.method === 'GET' && req.url.startsWith('/jp/')) { res.writeHead(404, cors); return res.end('{}'); }
+  if (req.method === 'POST' && req.url.startsWith('/v1/messages')) {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      const body = JSON.parse(raw);
+      aiCalls.push({ headers: req.headers, body, raw });
+      if (body.output_config && body.output_config.format) {
+        return sse(res, JSON.stringify({ title: 'Создание поста', cases: [
+          { name: 'Создание поста с валидными данными', category: 'positive', priority: 'high', method: 'POST', path: '/posts', headers: [], body: '{"title":"Т","body":"Б","userId":1}', expected_status: [201], checks: 'pm.test("Есть id", function () { pm.expect(pm.response.json()).to.have.property("id"); });', rationale: 'Основной сценарий' },
+          { name: 'Получение поста', category: 'positive', priority: 'medium', method: 'GET', path: '/posts/1', headers: [], body: '', expected_status: [200], checks: '', rationale: 'Чтение' },
+        ] }), body.model);
+      }
+      sse(res, 'Вероятная причина — **неверное ожидание** в тесте.\n\n```javascript\npm.test("Статус 404 для несуществующего поста", function () {\n    pm.response.to.have.status(404);\n});\n```', body.model);
+    });
+    return;
+  }
+  res.writeHead(404, cors); res.end();
+});
+
 (async () => {
+  await new Promise((r) => mockServer.listen(MOCK_PORT, '127.0.0.1', r));
   const downloads = fs.mkdtempSync(path.join(os.tmpdir(), 'ata-dl-'));
   const browser = await puppeteer.launch({ executablePath: CHROME_PATH, headless: true, args: ['--no-first-run'].concat(process.env.CI ? ['--no-sandbox'] : []) });
   const page = await browser.newPage();
@@ -133,6 +181,92 @@ const ok = (c, m) => { console.log((c ? '  ok  ' : '  FAIL') + ' ' + m); if (!c)
   });
   await page.waitForFunction(() => /POST\s*\/posts/.test(document.querySelector('#tree').innerText), { timeout: 5000 }).then(() => ok(true, 'cURL из перетащенного файла стал запросом'), () => ok(false, 'cURL из перетащенного файла стал запросом'));
 
+  console.log('— сканер безопасности');
+  await tab('mocks');
+  await page.evaluate(() => {
+    const S = window.ATA_STATE;
+    S.mocks.unshift(window.ATA.newMock({ name: 'утечка', method: 'GET', path: '/users/1', status: 200, headers: '{"Content-Type":"application/json","Server":"nginx/1.18.0"}', body: '[{"id":1,"email":"a@x.io","password":"hash1"},{"id":2,"email":"b@x.io","password":"hash2"}]' }));
+    S.mockMode = true;
+    window.ATA_APP.renderMockToggle();
+  });
+  await tab('collection');
+  await pickNode('^GET\\s*Пользователь по id');
+  await page.click('#sendBtn');
+  await page.waitForFunction(() => /мок:/.test(document.querySelector('#responsePanel').innerText), { timeout: 10000 });
+  await tab('security');
+  const secText = await page.$eval('#secList', (e) => e.innerText);
+  ok(/секретные поля/.test(secText) && /персональными данными/.test(secText), 'сканер: пароли и PII в ответе');
+  ok(!/Раскрытие версии ПО|Strict-Transport-Security/.test(secText), 'заголовки мока не проверяются (это не реальный сервер)');
+  ok(Number(await page.$eval('#secCount', (e) => e.textContent)) >= 1, 'бейдж высокого риска на вкладке');
+  await shot('4-security');
+  await page.evaluate(() => { const S = window.ATA_STATE; S.mocks.shift(); S.mockMode = false; window.ATA_APP.renderMockToggle(); });
+
+  console.log('— сравнение окружений');
+  await page.evaluate((port) => {
+    const S = window.ATA_STATE;
+    S.envs.push({ name: 'Stage (mock)', values: [{ key: 'baseUrl', value: 'http://127.0.0.1:' + port + '/jp', type: 'default', enabled: true }, { key: 'token', value: 'stage-token-not-secret', type: 'secret', enabled: true }] });
+  }, MOCK_PORT);
+  await tab('runner');
+  await page.evaluate(() => {
+    const opt = Array.from(document.querySelectorAll('#cmpScope option')).find((o) => /Пользователи/.test(o.text));
+    document.querySelector('#cmpScope').value = opt.value;
+    const S = window.ATA_STATE;
+    document.querySelector('#cmpEnvA').value = String(S.envs.findIndex((e) => e.name === 'Демо: JSONPlaceholder'));
+    document.querySelector('#cmpEnvB').value = String(S.envs.findIndex((e) => e.name === 'Stage (mock)'));
+  });
+  await page.click('#cmpBtn');
+  await page.waitForFunction(() => /Готово/.test(document.querySelector('#cmpStatus').textContent), { timeout: 30000 });
+  const cmpText = await page.$eval('#cmpResult', (e) => e.innerText);
+  ok(/отличий: \d+/.test(cmpText) && /разный статус/.test(cmpText), 'сравнение: тело отличается у пользователя, статус — у комментариев');
+  await page.evaluate(() => Array.from(document.querySelectorAll('#cmpResult tr.click')).find((r) => /Пользователь по id/.test(r.innerText)).click());
+  const diffText = await page.$eval('#cmpResult', (e) => e.innerText);
+  ok(/\$\.name/.test(diffText) && /Changed Name/.test(diffText) && /\$\.phone/.test(diffText), 'детали: $.name изменилось, $.phone пропало');
+  await shot('5-env-compare');
+
+  console.log('— ИИ-ассистент (mock Claude API)');
+  await tab('collection');
+  await pickNode('^GET\\s*Заведомо падающий');
+  await page.click('#sendBtn');
+  await page.waitForFunction(() => /проверки \d+\/\d+/.test(document.querySelector('#responsePanel').innerText), { timeout: 20000 });
+  await tab('ai');
+  await page.type('#aiKey', 'sk-ant-test-key-123');
+  await page.evaluate((port) => { const i = document.querySelector('#aiBaseUrl'); i.value = 'http://127.0.0.1:' + port; i.dispatchEvent(new Event('input')); }, MOCK_PORT);
+  await page.evaluate(() => Array.from(document.querySelectorAll('#aiActions button')).find((b) => /Почему упал/.test(b.textContent)).click());
+  await page.waitForFunction(() => /вход \d+ ток/.test(document.querySelector('#aiChat').innerText), { timeout: 30000 }).catch(() => {});
+  const chat = await page.$eval('#aiChat', (e) => e.innerText);
+  ok(/неверное ожидание/.test(chat) && /вход 1020 ток\. \(из кеша 900\), ответ 42/.test(chat), 'ответ ассистента отрисован, токены посчитаны: ' + chat.slice(-120).replace(/\s+/g, ' '));
+  ok(/Ход рассуждений/.test(chat), 'сводка рассуждений показана');
+  const call = aiCalls[0] || { headers: {}, body: {}, raw: '' };
+  // SDK 1.x (API 2026-10-21) передаёт ключ как Authorization: Bearer
+  ok(call.headers['authorization'] === 'Bearer sk-ant-test-key-123' && call.headers['anthropic-dangerous-direct-browser-access'] === 'true' && call.headers['anthropic-version'] === '2026-10-21', 'SDK: ключ в Authorization, заголовок прямого доступа из браузера, версия API');
+  ok(call.body.model === 'claude-opus-5-5' && call.body.fallbacks === 'default' && /server-side-fallback-2026-07-01/.test(call.headers['anthropic-beta'] || '') && call.body.stream === true, 'модель Opus 5.5, fallbacks: default, стриминг');
+  ok(call.body.output_config && call.body.output_config.effort === 'medium' && call.body.thinking && call.body.thinking.type === 'adaptive', 'effort и adaptive thinking');
+  ok(/<request_context>/.test(call.raw) && /posts\/0/.test(call.raw) && !/demo-token-not-secret|stage-token-not-secret|sk-ant-test-key-123/.test(JSON.stringify(call.body.messages)), 'контекст приложен, секреты и ключ замаскированы');
+  // кнопка «Добавить в Tests»
+  const addBtn = await page.evaluateHandle(() => Array.from(document.querySelectorAll('#aiChat .md-code button')).find((b) => /Добавить в Tests/.test(b.textContent)));
+  ok(!!(await addBtn.evaluate((b) => !!b)), 'у блока кода есть «Добавить в Tests»');
+  await addBtn.evaluate((b) => b.click());
+  const testsAfter = await page.evaluate(() => window.ATA.scriptOf(window.ATA.findById(window.ATA_STATE.coll, window.ATA_STATE.selectedId).item, 'test'));
+  ok(/от ИИ-ассистента/.test(testsAfter) && /Статус 404 для несуществующего поста/.test(testsAfter), 'код от ИИ добавлен в Tests запроса');
+  // второй вопрос: контекст не дублируется, история передаётся
+  await page.type('#aiInput', 'А что ещё проверить?');
+  await page.click('#aiSend');
+  await page.waitForFunction((n) => document.querySelectorAll('#aiChat .msg.assistant').length >= 2 && !document.querySelector('#aiChat .typing'), { timeout: 30000 });
+  const call2 = aiCalls[1] || { body: { messages: [] } };
+  ok(call2.body.messages.length === 3 && call2.body.messages[1].role === 'assistant' && call2.body.messages[1].content.some((b) => b.type === 'thinking'), 'история диалога с thinking-блоками передана обратно');
+  // кейсы из требований (structured outputs)
+  await page.type('#aiReq', 'Пользователь может создать пост. Заголовок обязателен, автор — текущий пользователь.');
+  await page.click('#aiReqBtn');
+  await page.waitForFunction(() => /Готово: \d+ кейсов/.test(document.querySelector('#aiReqInfo').textContent), { timeout: 30000 }).catch(() => {});
+  const call3 = aiCalls[2] || { body: {} };
+  ok(call3.body.output_config && call3.body.output_config.format && call3.body.output_config.format.type === 'json_schema', 'кейсы запрошены через structured outputs (json_schema)');
+  ok((await page.$$eval('#aiReqResult input[data-i]', (x) => x.length)) === 2, 'превью: 2 кейса');
+  await shot('6-ai');
+  await page.evaluate(() => Array.from(document.querySelectorAll('#aiReqResult button')).find((b) => /Добавить в коллекцию/.test(b.textContent)).click());
+  ok(/ИИ: Создание поста/.test(await page.$eval('#tree', (t) => t.innerText)), 'кейсы ИИ добавлены папкой в коллекцию');
+  const aiCase = await page.evaluate(() => { let it; window.ATA.eachRequest(window.ATA_STATE.coll.item, (x) => { if (/с валидными данными/.test(x.name)) it = x; }); return { url: it.request.url, tests: window.ATA.scriptOf(it, 'test') }; });
+  ok(aiCase.url === '{{baseUrl}}/posts' && /have\.status\(201\)/.test(aiCase.tests) && /Есть id/.test(aiCase.tests), 'кейс ИИ: URL от {{baseUrl}}, проверка статуса и тела');
+
   console.log('— сохранение и вёрстка');
   await page.reload({ waitUntil: 'networkidle0' });
   ok(/Список постов/.test(await page.$eval('#tree', (t) => t.innerText)), 'коллекция сохранилась после перезагрузки');
@@ -142,7 +276,7 @@ const ok = (c, m) => { console.log((c ? '  ok  ' : '  FAIL') + ' ' + m); if (!c)
   await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'dark' }]);
   await page.setViewport({ width: 390, height: 844, isMobile: true });
   await sleep(300);
-  for (const t of ['collection', 'runner', 'analysis', 'generate', 'load', 'contract', 'mocks']) {
+  for (const t of ['collection', 'runner', 'analysis', 'generate', 'load', 'contract', 'mocks', 'security', 'ai']) {
     await tab(t);
     const o = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
     ok(o <= 0, 'мобильная вкладка ' + t + ' без горизонтальной прокрутки' + (o > 0 ? ' (+' + o + 'px)' : ''));
@@ -152,6 +286,7 @@ const ok = (c, m) => { console.log((c ? '  ok  ' : '  FAIL') + ' ' + m); if (!c)
 
   ok(errors.length === 0, 'ошибок JS нет' + (errors.length ? ': ' + errors.join(' | ') : ''));
   await browser.close();
+  mockServer.close();
   fs.rmSync(downloads, { recursive: true, force: true });
   console.log(fails ? '\n' + fails + ' ПРОВАЛОВ' : '\nвсё ок');
   process.exit(fails ? 1 : 0);

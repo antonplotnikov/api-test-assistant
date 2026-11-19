@@ -461,6 +461,7 @@
       resp && resp.mocked ? h('span', { class: 'badge warn', text: 'мок: ' + resp.mocked }) : null,
       r.tests.length ? h('span', { class: 'badge ' + (passed === r.tests.length ? 'ok' : 'fail'), text: 'проверки ' + passed + '/' + r.tests.length }) : null,
       h('span', { style: 'flex:1' }),
+      window.ATA_AI ? h('button', { class: 'btn sm', text: '✦ Спросить ИИ', title: r.pass ? 'Предложить проверки для ответа' : 'Разобрать причину падения', onclick: () => window.ATA_AI.askAbout(r, r.pass ? 'tests' : 'explain') }) : null,
       r.request ? h('button', { class: 'btn sm', text: 'cURL', onclick: () => copy(A.toCurl(r.request), 'cURL') }) : null,
       resp ? h('button', { class: 'btn sm', text: 'В мок', title: 'Создать правило мока из этого ответа', onclick: () => { S.mocks.unshift(A.mockFromResult(r)); save(); window.ATA_UI.renderMocks(); renderMockToggle(); toast('Правило мока создано на вкладке «Моки»'); } }) : null,
       !r.pass ? h('button', { class: 'btn sm', text: 'Баг-репорт', onclick: () => copy(A.bugReport(r, a, env().name), 'Баг-репорт') }) : null));

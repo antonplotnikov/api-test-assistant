@@ -248,9 +248,11 @@
     if (common && common[1] >= Math.max(2, failed.length * 0.6) && /Авторизация|Сеть|Переменные|Таймаут/.test(common[0])) {
       sum.appendChild(h('div', { class: 'notice', text: 'Большинство падений одной природы («' + common[0] + '») — вероятно, общая причина (окружение, токен, доступность стенда), а не отдельные баги. Начните с неё.' }));
     }
+    if (window.ATA_AI && failed.length > 1) sum.appendChild(h('button', { class: 'btn sm', style: 'margin-top:8px', text: '✦ Разобрать все падения с ИИ', onclick: () => { P.setTab('ai'); window.ATA_AI.askText(A.AI.ACTIONS.failures.prompt); } }));
     analyses.forEach(({ r, a }) => {
       list.appendChild(h('div', { class: 'panel' },
         h('div', { class: 'row' }, r.request ? P.methodBadge(r.request.method) : null, h('strong', { text: r.name }), r.response ? P.statusBadge(r.response.code) : h('span', { class: 'badge fail', text: r.error ? r.error.kind : '' }), r.folder ? h('span', { class: 'hint', text: r.folder }) : null, h('span', { style: 'flex:1' }),
+          window.ATA_AI ? h('button', { class: 'btn sm', text: '✦ Спросить ИИ', onclick: () => window.ATA_AI.askAbout(r, 'explain') }) : null,
           h('button', { class: 'btn sm', text: 'Баг-репорт', onclick: () => copy(A.bugReport(r, a, P.env().name), 'Баг-репорт (Markdown)') }),
           r.request ? h('button', { class: 'btn sm', text: 'cURL', onclick: () => copy(A.toCurl(r.request), 'cURL') }) : null,
           h('button', { class: 'btn sm', text: 'Открыть', onclick: () => { P.setTab('collection'); P.select(r.id); } })),
@@ -327,6 +329,7 @@
     loadAbort = null;
     $('#loadBtn').disabled = false; $('#loadStop').classList.add('hide');
     $('#loadStatus').textContent = 'Готово: ' + res.samples.length + ' запросов за ' + res.elapsed.toFixed(1) + ' с' + (S.mockMode ? ' (моки включены!)' : '');
+    S.lastLoad = Object.assign(res, { name: f.item.name });
     drawLoad(res, false);
   });
   $('#loadStop').addEventListener('click', () => loadAbort && loadAbort.abort());

@@ -69,6 +69,38 @@
     ].join('\n');
   }
 
+  /**
+   * Структурный diff двух JSON: [{path, kind: 'changed'|'type'|'missing'|'added'|'length', a, b}]
+   * ignore — имена полей, которые не сравниваются (id, даты…). limit — максимум отличий.
+   */
+  function diffJson(a, b, opts) {
+    opts = opts || {};
+    const ignore = new Set(opts.ignore || []);
+    const limit = opts.limit || 200;
+    const out = [];
+    const t = (v) => (v === null ? 'null' : Array.isArray(v) ? 'array' : typeof v);
+    (function walk(x, y, path) {
+      if (out.length >= limit || x === y) return;
+      const tx = t(x), ty = t(y);
+      if (tx !== ty) { out.push({ path, kind: 'type', a: x, b: y }); return; }
+      if (tx !== 'object' && tx !== 'array') { if (x !== y) out.push({ path, kind: 'changed', a: x, b: y }); return; }
+      if (tx === 'array') {
+        if (x.length !== y.length) out.push({ path, kind: 'length', a: x.length, b: y.length });
+        for (let i = 0; i < Math.min(x.length, y.length, 50); i++) walk(x[i], y[i], path + '[' + i + ']');
+        return;
+      }
+      const keys = new Set(Object.keys(x).concat(Object.keys(y)));
+      for (const k of keys) {
+        if (ignore.has(k)) continue;
+        const p = path + (/^[A-Za-z_$][\w$]*$/.test(k) ? '.' + k : '[' + JSON.stringify(k) + ']');
+        if (!(k in y)) out.push({ path: p, kind: 'missing', a: x[k] });
+        else if (!(k in x)) out.push({ path: p, kind: 'added', b: y[k] });
+        else walk(x[k], y[k], p);
+      }
+    })(a, b, '$');
+    return out;
+  }
+
   /* ---------- история и сравнение прогонов ---------- */
   const runKey = (r) => r.id + '#' + (r.iteration || 0);
 
@@ -339,6 +371,7 @@
     boundary: 'Граничные значения',
     path: 'Параметры пути и query',
     robust: 'Устойчивость (спецсимволы, мусор)',
+    security: 'Безопасность (IDOR, методы, секреты в URL)',
   };
 
   function testScript(lines) { return lines.join('\n\n'); }
@@ -392,7 +425,8 @@
    */
   function generateCases(item, opts) {
     opts = opts || {};
-    const groups = opts.groups || new Set(Object.keys(CASE_GROUPS));
+    // «Безопасность» шлёт DELETE/PUT на эндпоинты чтения — включается только явно
+    const groups = opts.groups || new Set(Object.keys(CASE_GROUPS).filter((g) => g !== 'security'));
     const out = [];
     const method = item.request.method;
     const okStatus = opts.okStatus || (method === 'POST' ? 201 : 200);
@@ -470,6 +504,31 @@
       }
       const extra = ATA.clone(body); if (extra && typeof extra === 'object' && !Array.isArray(extra)) { extra.isAdmin = true; extra.role = 'admin'; extra.__proto_test__ = 1; }
       out.push(cloneItem(item, base + ' — лишние поля (mass assignment)', (r) => setJsonBody(r, extra), [T.not5xx.code(), 'pm.test("Лишнее поле isAdmin не применилось", function () {\n    var j = {};\n    try { j = pm.response.json(); } catch (e) {}\n    pm.expect(j.isAdmin).to.not.equal(true);\n});'], 'robust'));
+    }
+    if (groups.has('security')) {
+      const raw = ATA.urlRaw(item.request.url);
+      const noLeak = 'pm.test("В ответе нет стектрейса и SQL-ошибок", function () {\n    pm.expect(pm.response.text()).to.not.match(/Traceback \\(most recent call last\\)|at [\\w.$]+ \\([^)]*:\\d+:\\d+\\)|SQLSTATE|SQLException|ORA-\\d{5}|syntax error at or near/);\n});';
+      // IDOR / BOLA: соседний id другого пользователя должен быть недоступен
+      const idm = /^(.*\/)(\d+)(\/?(?:\?.*)?)$/.exec(raw.split('#')[0]);
+      if (idm) {
+        const neighbor = String(Number(idm[2]) + 1);
+        out.push(cloneItem(item, base + ' — IDOR: чужой id ' + neighbor, (r) => { r.url = idm[1] + neighbor + idm[3]; }, [
+          '// Если ресурс с этим id принадлежит другому пользователю — ожидаем отказ.\n// Если id общедоступен по бизнес-логике, удалите этот кейс.',
+          T.statusIn.code('403,404'), noLeak], 'security'));
+      }
+      // подмена метода: эндпоинт чтения не должен позволять изменять данные
+      if (method === 'GET') {
+        ['DELETE', 'PUT', 'PATCH'].forEach((m) => out.push(cloneItem(item, base + ' — метод ' + m + ' вместо GET', (r) => { r.method = m; setJsonBody(r, {}); }, [T.statusIn.code('401,403,404,405'), noLeak], 'security')));
+      }
+      // авторизация через query вместо заголовка не должна приниматься (секреты в URL оседают в логах)
+      out.push(cloneItem(item, base + ' — токен в query вместо заголовка', (r) => {
+        r.auth = { type: 'noauth' };
+        r.header = (r.header || []).filter((h) => !/^authorization$/i.test(h.key));
+        r.url = raw + (raw.indexOf('?') === -1 ? '?' : '&') + 'access_token={{token}}';
+      }, ['// Сервер не должен принимать токен из URL: он попадает в логи прокси и историю браузера.', T.statusIn.code('400,401,403'), noLeak], 'security'));
+      out.push(cloneItem(item, base + ' — заголовки подмены (X-Forwarded-For, X-Original-URL)', (r) => {
+        r.header = (r.header || []).concat([{ key: 'X-Forwarded-For', value: '127.0.0.1' }, { key: 'X-Original-URL', value: '/admin' }, { key: 'X-HTTP-Method-Override', value: 'DELETE' }]);
+      }, [T.not5xx.code(), noLeak, 'pm.test("Заголовки подмены не меняют поведение", function () {\n    pm.expect(pm.response.code).to.not.equal(204);\n});'], 'security'));
     }
     return out;
   }
@@ -577,5 +636,5 @@
     return lines.join('\n');
   }
 
-  Object.assign(ATA, { snapshotCode, summarizeRun, compareRuns, runKey, junitXml, htmlReport, ASSERTION_TYPES, inferSchema, analyze, bugReport, maskReq, CASE_GROUPS, generateCases, collectionFromOpenApi, newMock, mockFromResult, mocksFromOpenApi, FAILURE_PRESETS, collectionWithExamples, runReport, jsonBodyOf, setJsonBody });
+  Object.assign(ATA, { diffJson, snapshotCode, summarizeRun, compareRuns, runKey, junitXml, htmlReport, ASSERTION_TYPES, inferSchema, analyze, bugReport, maskReq, CASE_GROUPS, generateCases, collectionFromOpenApi, newMock, mockFromResult, mocksFromOpenApi, FAILURE_PRESETS, collectionWithExamples, runReport, jsonBodyOf, setJsonBody });
 })(typeof window !== 'undefined' ? window : globalThis);

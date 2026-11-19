@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const root = path.join(__dirname, '..');
-for (const f of ['schema.js', 'pm.js', 'core.js', 'gen.js']) vm.runInThisContext(fs.readFileSync(path.join(root, 'js', f), 'utf8'), { filename: f });
+for (const f of ['schema.js', 'pm.js', 'core.js', 'gen.js', 'security.js', 'ai.js']) vm.runInThisContext(fs.readFileSync(path.join(root, 'js', f), 'utf8'), { filename: f });
 const ATA = globalThis.ATA;
 const readJson = (p) => JSON.parse(fs.readFileSync(path.join(root, p), 'utf8'));
 
@@ -115,6 +115,59 @@ const section = (s) => console.log('— ' + s);
   const back = ATA.fromCurl(ATA.toCurl(b));
   ok(back.request.method === 'POST' && back.request.url === b.url, 'cURL туда-обратно');
   ok(ATA.parseCsv('a,b\n1,"x,y"\n2,z\n').length === 2, 'CSV с кавычками');
+
+  section('diff ответов (сравнение окружений)');
+  const d = ATA.diffJson({ id: 1, name: 'a', tags: [1, 2], meta: { v: 1 }, old: true }, { id: 2, name: 'b', tags: [1], meta: { v: '1' }, extra: 0 }, { ignore: ['id'] });
+  const kinds = Object.fromEntries(d.map((x) => [x.path, x.kind]));
+  ok(kinds['$.name'] === 'changed' && kinds['$.tags'] === 'length' && kinds['$.meta.v'] === 'type' && kinds['$.old'] === 'missing' && kinds['$.extra'] === 'added' && !kinds['$.id'], 'changed / length / type / missing / added, id игнорируется');
+  ok(ATA.diffJson({ a: [1, { b: 2 }] }, { a: [1, { b: 2 }] }).length === 0, 'одинаковые — без отличий');
+
+  section('группа кейсов «Безопасность»');
+  ok(!ATA.generateCases(byId.item, {}).some((c) => c._group === 'security'), 'по умолчанию выключена (шлёт DELETE/PUT)');
+  const getOne = ATA.newRequest('Пользователь', 'GET', '{{baseUrl}}/users/5');
+  const sec = ATA.generateCases(getOne, { groups: new Set(['security']) });
+  ok(sec.some((c) => /IDOR: чужой id 6/.test(c.name) && /\/users\/6$/.test(c.request.url)), 'IDOR: соседний id');
+  ok(['DELETE', 'PUT', 'PATCH'].every((m) => sec.some((c) => c.request.method === m)), 'подмена метода');
+  ok(sec.some((c) => /access_token=\{\{token\}\}/.test(c.request.url)), 'токен в query');
+
+  section('сканер безопасности');
+  const mkR = (o) => Object.assign({ id: 'x', name: 'x', tests: [], request: { method: 'GET', url: 'https://api.example.com/users', headers: [['Authorization', 'Bearer abc']] } }, o);
+  const mkResp = (code, json, headers, text) => ({ code, status: '', headers: headers || [['content-type', 'application/json']], json, text: text || JSON.stringify(json), timeMs: 10, size: 100 });
+  const ids = (r) => ATA.scanResult(r).map((f) => f.id);
+  const leak = ids(mkR({ response: mkResp(500, undefined, [['content-type', 'text/plain']], 'Error\n    at Object.handler (/srv/app/src/users.js:42:13)') }));
+  ok(leak.some((x) => /^leak-/.test(x)), 'стектрейс в 500');
+  const users = Array.from({ length: 3 }, (_, i) => ({ id: i, email: 'u' + i + '@x.io', password: 'hash' + i }));
+  const u = ids(mkR({ response: mkResp(200, users) }));
+  ok(u.includes('secret-field') && u.includes('pii-list') && u.includes('cacheable-private'), 'пароль в ответе, PII в списке, кешируемый приватный ответ: ' + u.join(','));
+  ok(ids(mkR({ request: { method: 'GET', url: 'http://api.example.com/x?api_key=1', headers: [['Authorization', 'Bearer t']] }, response: mkResp(200, {}) })).filter((x) => x === 'no-https' || x === 'secret-in-url').length === 2, 'HTTP с токеном и секрет в URL');
+  ok(ids(mkR({ name: 'Пост — без авторизации', response: mkResp(200, { a: 1 }) })).includes('no-auth'), 'кейс «без авторизации» с 200 → обход аутентификации');
+  ok(ids(mkR({ response: mkResp(200, { card: '4111 1111 1111 1111' }) })).includes('card-number'), 'номер карты (Луна)');
+  ok(!ids(mkR({ response: mkResp(200, { n: '1234 5678 9012 3456' }) })).includes('card-number'), 'не-Луна не считается картой');
+  const hidden = ids(mkR({ response: mkResp(200, { a: 1 }) }));
+  ok(!hidden.includes('no-nosniff'), 'заголовки скрыты CORS → проверки заголовков пропущены');
+  const visible = ids(mkR({ response: mkResp(200, { a: 1 }, [['content-type', 'application/json'], ['server', 'nginx/1.18.0'], ['x-powered-by', 'Express']]) }));
+  ok(visible.includes('no-nosniff') && visible.includes('no-hsts') && visible.includes('version-disclosure'), 'видимые заголовки: nosniff, HSTS, версия ПО');
+  const all = ATA.scanAll([mkR({ id: 'a', response: mkResp(200, users) }), mkR({ id: 'b', response: mkResp(200, users) })], { load: { samples: new Array(60).fill({}), statusCounts: { 200: 60 }, elapsed: 2 } });
+  ok(all.findings[0].sev === 'high' && all.findings.find((f) => f.id === 'secret-field').affected.length === 2 && all.findings.some((f) => f.id === 'no-rate-limit') && all.headersHidden, 'сводка: сортировка, группировка, rate limit, скрытые заголовки');
+
+  section('ИИ: маскирование, контекст, разбор');
+  const AI = ATA.AI;
+  const masked = AI.maskText('Authorization: Bearer abcdef123456\n{"password":"p@ss","x":"my-secret-value"} eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2QT4 sk-ant-api03-xyz', ['my-secret-value']);
+  ok(!/abcdef123456|p@ss|my-secret-value|SflKxw|api03/.test(masked), 'токены, пароли, JWT, ключи и значения секретов скрыты: ' + masked.replace(/\n/g, ' '));
+  const ctxText = AI.requestContext({ item: byId.item, folder: 'Посты', result: mr, analysis: ATA.analyze(mr), secrets: ['demo-token-not-secret'] });
+  ok(/<request_context>/.test(ctxText) && /Контракт OpenAPI/.test(ctxText) && !/demo-token-not-secret/.test(ctxText), 'контекст запроса без секрета окружения');
+  ok(/GET \/posts\/\{id\}/.test(AI.specContext(spec)) && /Создать пост/.test(AI.collectionContext(coll)), 'контекст спеки и коллекции');
+  const md = AI.renderMarkdown('# Итог\nТекст <script>alert(1)</script> и `code`\n\n- пункт **важно**\n\n```javascript\npm.test("x", function () {});\n```\n\n| a | b |\n|---|---|\n| 1 | <b>2</b> |');
+  ok(!/<script>|<b>2/.test(md.html) && /<h3>Итог<\/h3>/.test(md.html) && /<strong>важно<\/strong>/.test(md.html) && /<table>/.test(md.html), 'Markdown: экранирование, заголовки, списки, таблицы');
+  ok(md.codes.length === 1 && md.codes[0].lang === 'javascript' && AI.looksLikePmTests(md.codes[0].code), 'блок кода с pm.test найден');
+  const items = AI.casesToItems({ title: 't', cases: [
+    { name: 'Создание', category: 'positive', priority: 'high', method: 'POST', path: '/posts', headers: [{ key: 'Authorization', value: 'x' }, { key: 'X-Req', value: '1' }], body: '{"a":1}', expected_status: [201], checks: 'pm.test("id", function () { pm.expect(pm.response.json()).to.have.property("id"); });', rationale: 'R1' },
+    { name: 'Битый код', category: 'negative', priority: 'low', method: 'GET', path: 'posts/0', headers: [], body: '', expected_status: [400, 404], checks: 'pm.test("x", function () {', rationale: 'R2' },
+  ] });
+  ok(items[0].request.url === '{{baseUrl}}/posts' && items[0].request.header.length === 1 && items[0].request.body.options.raw.language === 'json', 'кейс → запрос: URL, заголовки без Authorization, JSON-тело');
+  const t0 = ATA.scriptOf(items[0], 'test'), t1 = ATA.scriptOf(items[1], 'test');
+  ok(/have\.status\(201\)/.test(t0) && /property\("id"\)/.test(t0) && /oneOf\(\[400, 404\]\)/.test(t1) && /не компилируется/.test(t1) && items[1].request.url === '{{baseUrl}}/posts/0', 'проверки статуса, код ИИ, некомпилируемый код закомментирован');
+  ok(AI.CASES_SCHEMA.properties.cases.items.additionalProperties === false && AI.MODELS[0].id === 'claude-opus-5-5', 'схема structured outputs и модель по умолчанию');
 
   if (process.env.NETWORK) {
     section('реальная сеть (jsonplaceholder)');

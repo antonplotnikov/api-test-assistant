@@ -147,6 +147,29 @@ dialog::backdrop { background: rgba(0,0,0,.4); }
 .varline { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 6px; }
 .varline .badge { font-family: var(--mono); font-weight: 500; }
 body.dragging::after { content: "Отпустите файл: коллекция, окружение, OpenAPI или cURL"; position: fixed; inset: 10px; z-index: 100; display: flex; align-items: center; justify-content: center; border: 3px dashed var(--accent); border-radius: 12px; background: color-mix(in srgb, var(--bg) 85%, transparent); color: var(--accent); font-size: 18px; font-weight: 600; pointer-events: none; padding: 16px; text-align: center; }
+/* ИИ-ассистент */
+nav.tabs button.ai-tab { color: var(--patch); }
+nav.tabs button.ai-tab.active { border-bottom-color: var(--patch); color: var(--patch); }
+.chat { display: flex; flex-direction: column; gap: 10px; margin: 10px 0; max-height: 62vh; overflow-y: auto; padding-right: 2px; }
+.chat:empty::before { content: "Выберите действие выше или задайте вопрос. Ассистент видит контекст, отмеченный слева."; color: var(--muted); text-align: center; padding: 24px 8px; }
+.msg { border-radius: 8px; padding: 10px 12px; max-width: 100%; min-width: 0; overflow-wrap: anywhere; }
+.msg.user { background: var(--info-bg); align-self: flex-end; max-width: 88%; white-space: pre-wrap; }
+.msg.assistant { background: var(--panel-2); }
+.msg.error { background: var(--fail-bg); color: var(--fail); }
+.msg .meta { font-size: 11.5px; color: var(--muted); margin-top: 6px; }
+.msg p { margin: 6px 0; }
+.msg h3, .msg h4, .msg h5, .msg h6 { margin: 10px 0 4px; font-size: 14px; }
+.msg ul, .msg ol { margin: 4px 0; padding-left: 20px; }
+.msg code { font-family: var(--mono); font-size: 12.5px; background: var(--code-bg); padding: 1px 4px; border-radius: 4px; }
+.md-code { margin: 8px 0; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--code-bg); }
+.md-code pre { margin: 0; padding: 10px; overflow-x: auto; max-height: 360px; }
+.md-code pre code { background: none; padding: 0; }
+.md-code .bar { display: flex; gap: 6px; padding: 5px 8px; border-top: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+.thinking { font-size: 12.5px; color: var(--muted); margin-bottom: 6px; }
+.thinking pre { white-space: pre-wrap; font-family: inherit; margin: 4px 0 0; max-height: 200px; overflow: auto; }
+.typing::after { content: "▍"; animation: blink 1s steps(1) infinite; color: var(--accent); }
+@keyframes blink { 50% { opacity: 0; } }
+.sev-high { color: var(--fail); } .sev-medium { color: var(--warn); } .sev-low { color: var(--info); }
 .kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; color: var(--muted); }
 </style>
 </head>
@@ -169,6 +192,8 @@ body.dragging::after { content: "Отпустите файл: коллекция
     <button data-tab="load">Нагрузка</button>
     <button data-tab="contract">Контракт</button>
     <button data-tab="mocks">Моки</button>
+    <button data-tab="security">Безопасность <span class="count hide" id="secCount"></span></button>
+    <button data-tab="ai" class="ai-tab">✦ ИИ-ассистент</button>
   </nav>
 </header>
 
@@ -242,6 +267,21 @@ body.dragging::after { content: "Отпустите файл: коллекция
       <div class="tbl-wrap" style="margin-top:8px"><table id="runTable"></table></div>
     </div>
     <div class="panel hide" id="runDetail"></div>
+    <div class="panel" id="envComparePanel">
+      <h2>Сравнение окружений</h2>
+      <p class="hint">Одни и те же запросы уходят в два окружения (например, dev и stage), ответы сравниваются по полям: так видно, что изменилось при выкладке и где окружения разъехались.</p>
+      <div class="row">
+        <label class="f grow">Что сравнивать<select id="cmpScope"></select></label>
+        <label class="f">Окружение A<select id="cmpEnvA"></select></label>
+        <label class="f">Окружение B<select id="cmpEnvB"></select></label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label class="chk"><input type="checkbox" id="cmpOnlyGet" checked> Только GET/HEAD — не изменять данные</label>
+        <label class="f grow">Не сравнивать поля<input type="text" id="cmpIgnore" value="id, createdAt, updatedAt, timestamp, requestId"></label>
+      </div>
+      <div class="row" style="margin-top:8px"><button class="btn primary" id="cmpBtn">Сравнить</button><span class="hint" id="cmpStatus"></span></div>
+      <div id="cmpResult"></div>
+    </div>
     <div class="panel" id="historyPanel"></div>
   </section>
 
@@ -339,6 +379,58 @@ body.dragging::after { content: "Отпустите файл: коллекция
     </div>
     <div id="mockList"></div>
   </section>
+
+  <!-- Безопасность -->
+  <section class="tab" id="tab-security">
+    <div class="panel">
+      <h2>Сканер безопасности</h2>
+      <p class="hint">Пассивная проверка уже полученных ответов по мотивам OWASP API Security Top 10: утечки стектрейсов и секретов, персональные данные, транспорт, заголовки, кеширование, rate limit. Сканер ничего дополнительно не отправляет. Для активных проверок (IDOR, подмена метода, токен в URL) сгенерируйте кейсы группы «Безопасность» и запустите их на тестовом стенде.</p>
+      <div class="row"><button class="btn primary" id="secScan">Сканировать результаты</button><button class="btn" id="secGen">Активные проверки…</button><span class="hint" id="secInfo"></span></div>
+      <div class="stats" id="secStats"></div>
+      <div id="secNotice"></div>
+    </div>
+    <div id="secList"></div>
+  </section>
+
+  <!-- ИИ-ассистент -->
+  <section class="tab" id="tab-ai">
+    <div class="grid-2">
+      <div>
+        <div class="panel">
+          <h2>Подключение к Claude</h2>
+          <label class="f">API-ключ Anthropic<input type="password" id="aiKey" placeholder="sk-ant-…" autocomplete="off" spellcheck="false"></label>
+          <label class="chk" style="margin-top:6px"><input type="checkbox" id="aiRemember"> Запомнить ключ в этом браузере</label>
+          <label class="f" style="margin-top:8px">Модель<select id="aiModel"></select></label>
+          <label class="f" style="margin-top:8px">Тщательность (effort)<select id="aiEffort"><option value="low">low — быстрее и дешевле</option><option value="medium">medium — баланс</option><option value="high">high — тщательнее</option></select></label>
+          <details style="margin-top:8px"><summary class="hint">Дополнительно</summary>
+            <label class="f" style="margin-top:6px">Base URL (свой прокси до API, необязательно)<input type="text" id="aiBaseUrl" placeholder="https://api.anthropic.com" spellcheck="false"></label>
+          </details>
+          <p class="hint">Запросы идут из браузера напрямую в API Anthropic по вашему ключу и оплачиваются с вашего аккаунта. Ключ не попадает в экспорт; без галочки «Запомнить» он живёт до перезагрузки страницы. Создать ключ: platform.claude.com → Settings → API keys. На общем компьютере используйте отдельный ключ с лимитом расходов.</p>
+        </div>
+        <div class="panel">
+          <h2>Что видит ассистент</h2>
+          <div id="aiContext"></div>
+          <p class="hint">Перед отправкой токены, пароли, JWT и значения секретов окружения заменяются на ••••. Тела ответов обрезаются до 8000 символов.</p>
+        </div>
+      </div>
+      <div>
+        <div class="panel">
+          <div class="row"><h2 style="margin:0">Ассистент</h2><span style="flex:1"></span><button class="btn sm" id="aiNew">Новый диалог</button></div>
+          <div class="row" id="aiActions" style="margin-top:8px"></div>
+          <div id="aiChat" class="chat" aria-live="polite"></div>
+          <textarea id="aiInput" placeholder="Спросите про запрос, ответ, падение или тесты…  (⌘/Ctrl+Enter — отправить)" style="min-height:70px"></textarea>
+          <div class="row" style="margin-top:6px"><button class="btn primary" id="aiSend">Отправить</button><button class="btn hide" id="aiStop">■ Стоп</button><span class="hint" id="aiUsage"></span></div>
+        </div>
+        <div class="panel">
+          <h2>Тест-кейсы из требований</h2>
+          <p class="hint">Вставьте user story, текст задачи или фрагмент спецификации. Claude составит кейсы с учётом вашей коллекции и OpenAPI, их можно сразу добавить в коллекцию и запустить.</p>
+          <textarea id="aiReq" placeholder="Например: «Пользователь может создать пост. Заголовок обязателен, 1–120 символов. Автор — текущий пользователь. Нельзя создать больше 10 постов в минуту…»"></textarea>
+          <div class="row" style="margin-top:6px"><label class="f">Кейсов<input type="number" id="aiReqCount" value="12" min="3" max="40" style="width:80px"></label><button class="btn primary" id="aiReqBtn">Составить кейсы</button><span class="hint" id="aiReqInfo"></span></div>
+          <div id="aiReqResult"></div>
+        </div>
+      </div>
+    </div>
+  </section>
 </main>
 
 <dialog id="importDlg">
@@ -370,7 +462,11 @@ body.dragging::after { content: "Отпустите файл: коллекция
 <script src="js/pm.js"></script>
 <script src="js/core.js"></script>
 <script src="js/gen.js"></script>
+<script src="js/security.js"></script>
+<script src="js/ai.js"></script>
 <script src="js/app.js"></script>
 <script src="js/app2.js"></script>
+<script src="js/app3.js"></script>
+<script src="js/ai-ui.js"></script>
 </body>
 </html>
